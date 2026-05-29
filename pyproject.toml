@@ -60,5 +60,10 @@ line-length = 120
 indent-width = 4
 extend-exclude = ["comic_text_detector", "notebooks"]
 
+[dependency-groups]
+dev = [
+    "pyinstrument>=5.1.2",
+]
+
 [project.scripts]
 mokuro = "mokuro.__main__:main"
