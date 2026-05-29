@@ -1,4 +1,6 @@
 import cv2
+import json
+import time
 import numpy as np
 from PIL import Image
 from loguru import logger
@@ -6,6 +8,7 @@ from scipy.signal.windows import gaussian
 
 from comic_text_detector.inference import TextDetector
 from manga_ocr import MangaOcr
+from manga_ocr.ocr import post_process
 from mokuro import __version__
 from mokuro.cache import cache
 from mokuro.utils import imread
@@ -28,14 +31,24 @@ class MangaPageOcr:
         max_ratio_hor=8,
         anchor_window=2,
         disable_ocr=False,
+        dev_repeat_ocr_batch_size=1,
     ):
         self.text_height = text_height
         self.max_ratio_vert = max_ratio_vert
         self.max_ratio_hor = max_ratio_hor
         self.anchor_window = anchor_window
         self.disable_ocr = disable_ocr
+        self.dev_repeat_ocr_batch_size = dev_repeat_ocr_batch_size
+
+        if self.dev_repeat_ocr_batch_size < 1:
+            raise ValueError("dev_repeat_ocr_batch_size must be at least 1")
 
         if not self.disable_ocr:
+            if self.dev_repeat_ocr_batch_size > 1:
+                logger.warning(
+                    "DEV ONLY: running OCR with artificial repeated-crop batch size "
+                    f"{self.dev_repeat_ocr_batch_size}; duplicate outputs are discarded."
+                )
             if not force_cpu and torch.cuda.is_available():
                 device = "cuda"
             elif not force_cpu and torch.backends.mps.is_available():
@@ -48,7 +61,7 @@ class MangaPageOcr:
             )
             self.mocr = MangaOcr(pretrained_model_name_or_path, force_cpu)
 
-    def __call__(self, img_path):
+    def __call__(self, img_path, page_idx=0, timings_fh=None):
         img = imread(img_path)
         if img is None:
             raise InvalidImage()
@@ -85,10 +98,34 @@ class MangaPageOcr:
                 )
 
                 line_text = ""
-                for line_crop in line_crops:
+                for chunk_idx, line_crop in enumerate(line_crops):
+                    crop_h, crop_w = line_crop.shape[:2]
                     if blk.vertical:
                         line_crop = cv2.rotate(line_crop, cv2.ROTATE_90_CLOCKWISE)
-                    line_text += self.mocr(Image.fromarray(line_crop))
+
+                    t0 = time.perf_counter()
+                    chunk_text = self._recognize_crop(Image.fromarray(line_crop))
+                    elapsed_ms = (time.perf_counter() - t0) * 1000
+
+                    if timings_fh is not None:
+                        num_tokens = len(self.mocr.tokenizer.encode(chunk_text)) - 2  # subtract CLS/SEP
+                        timings_fh.write(
+                            json.dumps({
+                                "page": page_idx,
+                                "blk": blk_idx,
+                                "line": line_idx,
+                                "chunk": chunk_idx,
+                                "crop_h": crop_h,
+                                "crop_w": crop_w,
+                                "area": crop_h * crop_w,
+                                "aspect": round(crop_w / crop_h, 2) if crop_h else 0,
+                                "tokens": num_tokens,
+                                "ocr_ms": round(elapsed_ms, 1),
+                                "ocr_batch_size": self.dev_repeat_ocr_batch_size,
+                            }) + "\n"
+                        )
+
+                    line_text += chunk_text
 
                 result_blk["lines_coords"].append(line.tolist())
                 result_blk["lines"].append(line_text)
@@ -96,6 +133,17 @@ class MangaPageOcr:
             result["blocks"].append(result_blk)
 
         return result
+
+    def _recognize_crop(self, img):
+        if self.dev_repeat_ocr_batch_size == 1:
+            return self.mocr(img)
+
+        img = img.convert("L").convert("RGB")
+        x = self.mocr._preprocess(img)
+        x = x[None].repeat(self.dev_repeat_ocr_batch_size, 1, 1, 1).to(self.mocr.model.device)
+        x = self.mocr.model.generate(x, max_length=300)[0].cpu()
+        text = self.mocr.tokenizer.decode(x, skip_special_tokens=True)
+        return post_process(text)
 
     @staticmethod
     def split_into_chunks(img, mask_refined, blk, line_idx, textheight, max_ratio=16, anchor_window=2):

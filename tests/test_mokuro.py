@@ -2,8 +2,11 @@ import json
 import shutil
 
 import pytest
+import torch
 from loguru import logger
+from PIL import Image
 
+from mokuro.manga_page_ocr import MangaPageOcr
 from mokuro.run import run
 
 
@@ -60,6 +63,64 @@ def test_mokuro_zip(input_dir_name, unzip, tmp_path, input_data_root, expected_r
 
     else:
         assert not (input_dir / "vol1").exists()
+
+
+def test_page_limit(tmp_path, input_data_root):
+    input_dir = tmp_path / "test0"
+    shutil.copytree(input_data_root / "test0", input_dir)
+
+    run(
+        parent_dir=input_dir,
+        force_cpu=True,
+        disable_confirmation=True,
+        disable_ocr=True,
+        legacy_html=False,
+        page_limit=2,
+    )
+
+    json_paths = sorted((input_dir / "_ocr/vol1").iterdir())
+    assert [path.name for path in json_paths] == ["000a.json", "000b.json"]
+
+    mokuro = json.loads((input_dir / "vol1.mokuro").read_text(encoding="utf-8"))
+    assert [page["img_path"] for page in mokuro["pages"]] == ["000a.jpg", "000b.jpg"]
+
+
+def test_dev_repeat_ocr_batch_size_uses_first_output():
+    class FakeModel:
+        device = torch.device("cpu")
+
+        def __init__(self):
+            self.input_shape = None
+
+        def generate(self, x, max_length):
+            self.input_shape = tuple(x.shape)
+            return torch.tensor([[1, 2, 3], [4, 5, 6]])
+
+    class FakeTokenizer:
+        def __init__(self):
+            self.seen_tokens = None
+
+        def decode(self, tokens, skip_special_tokens):
+            self.seen_tokens = tokens.tolist()
+            return "first"
+
+    class FakeMangaOcr:
+        def __init__(self):
+            self.model = FakeModel()
+            self.tokenizer = FakeTokenizer()
+
+        def _preprocess(self, img):
+            return torch.zeros(3, 2, 2)
+
+    mpocr = MangaPageOcr.__new__(MangaPageOcr)
+    mpocr.dev_repeat_ocr_batch_size = 2
+    mpocr.mocr = FakeMangaOcr()
+
+    text = mpocr._recognize_crop(Image.new("RGB", (2, 2)))
+
+    assert text
+    assert mpocr.mocr.tokenizer.seen_tokens == [1, 2, 3]
+    assert mpocr.mocr.model.input_shape == (2, 3, 2, 2)
 
 
 def _setup_and_run(

@@ -25,6 +25,9 @@ def run(
     legacy_html: bool = True,
     as_one_file: bool = True,
     version: bool = False,
+    timings_file: Optional[Union[str, Path]] = None,
+    page_limit: Optional[int] = None,
+    dev_repeat_ocr_batch_size: int = 1,
 ):
     """
     Process manga volumes with mokuro.
@@ -42,14 +45,28 @@ def run(
         legacy_html: Enable legacy HTML output. If True, acts as if --unzip is True.
         as_one_file: Applies only to legacy HTML. If False, generate separate CSS and JS files instead of embedding them in the HTML file.
         version: Print the version of mokuro and exit.
+        timings_file: Path to a JSONL file to write per-chunk OCR timing records. Each line contains page, block, line, chunk indices plus crop dimensions and OCR latency in milliseconds.
+        page_limit: Process only the first N pages of each volume. If None, process all pages.
+        dev_repeat_ocr_batch_size: DEV ONLY. Artificially batch each OCR crop by repeating it N times, return only the first decoded output, and discard the rest. This is a smoke-test knob for generation batching overhead, not a real batching implementation.
     """
 
     if version:
         print(f"{__version__}")
         return
 
+    if page_limit is not None and page_limit < 0:
+        raise ValueError("page_limit must be non-negative")
+
+    if dev_repeat_ocr_batch_size < 1:
+        raise ValueError("dev_repeat_ocr_batch_size must be at least 1")
+
     if disable_ocr:
         logger.info("Running with OCR disabled")
+    elif dev_repeat_ocr_batch_size > 1:
+        logger.warning(
+            "DEV ONLY: --dev-repeat-ocr-batch-size repeats every OCR crop inside one generate() batch "
+            "and discards all but the first output. Do not use for production OCR."
+        )
 
     if legacy_html:
         logger.warning(
@@ -116,34 +133,51 @@ def run(
         if inp.lower() not in ("y", "yes"):
             return
 
+    timings_fh = None
+    if timings_file is not None:
+        timings_fh = open(timings_file, "w", encoding="utf-8")
+
     mg = MokuroGenerator(
-        pretrained_model_name_or_path=pretrained_model_name_or_path, force_cpu=force_cpu, disable_ocr=disable_ocr
+        pretrained_model_name_or_path=pretrained_model_name_or_path,
+        force_cpu=force_cpu,
+        disable_ocr=disable_ocr,
+        timings_fh=timings_fh,
+        dev_repeat_ocr_batch_size=dev_repeat_ocr_batch_size,
     )
 
-    with TemporaryDirectory() as tmp_dir:
-        tmp_dir = Path(tmp_dir)
+    try:
+        with TemporaryDirectory() as tmp_dir:
+            tmp_dir = Path(tmp_dir)
 
-        # unzip == True means that zipped volumes will be unzipped in their original location
-        # in that case, we don't use a temporary directory
-        if unzip:
-            tmp_dir = None
+            # unzip == True means that zipped volumes will be unzipped in their original location
+            # in that case, we don't use a temporary directory
+            if unzip:
+                tmp_dir = None
 
-        num_sucessful = 0
-        for i, volume in enumerate(vc):
-            logger.info(f"Processing {i + 1}/{len(vc)}: {volume.path_in}")
+            num_sucessful = 0
+            for i, volume in enumerate(vc):
+                logger.info(f"Processing {i + 1}/{len(vc)}: {volume.path_in}")
 
-            try:
-                volume.unzip(tmp_dir)
-                mg.process_volume(volume, ignore_errors=ignore_errors, no_cache=no_cache)
-                if legacy_html:
-                    generate_legacy_html(volume, as_one_file=as_one_file, ignore_errors=ignore_errors)
+                try:
+                    volume.unzip(tmp_dir)
+                    mg.process_volume(
+                        volume,
+                        ignore_errors=ignore_errors,
+                        no_cache=no_cache,
+                        page_limit=page_limit,
+                    )
+                    if legacy_html:
+                        generate_legacy_html(volume, as_one_file=as_one_file, ignore_errors=ignore_errors)
 
-            except Exception:
-                logger.exception(f"Error while processing {volume.path_in}")
-            else:
-                num_sucessful += 1
+                except Exception:
+                    logger.exception(f"Error while processing {volume.path_in}")
+                else:
+                    num_sucessful += 1
 
-        logger.info(f"Processed successfully: {num_sucessful}/{len(vc)}")
+            logger.info(f"Processed successfully: {num_sucessful}/{len(vc)}")
+    finally:
+        if timings_fh is not None:
+            timings_fh.close()
 
 
 if __name__ == "__main__":

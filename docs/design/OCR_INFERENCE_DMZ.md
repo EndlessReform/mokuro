@@ -9,6 +9,7 @@ Mokuro should own:
 - manga volume discovery, cache layout, and `.mokuro` generation
 - page image loading
 - text detection and page layout interpretation
+- page-level detector batching and page-layout scheduling
 - crop extraction, vertical-text normalization, chunk splitting, and chunk reassembly
 - deterministic mapping from OCR results back into page/block/line output
 
@@ -23,6 +24,16 @@ Inference engines should own:
 
 The main boundary is OCR crop inference. Text detection is intentionally left inside mokuro for now. It is lower payoff to externalize because it is one page-level detector call, materially smaller than the OCR stack, and tightly coupled to mokuro's layout/crop extraction through masks and block objects.
 
+Update after the macOS MPS smoke test: text detection should still stay inside mokuro's public API boundary, but it should not stay welded to the per-page OCR call. On Apple Silicon, simply moving the detector from CPU to MPS made end-to-end time much better, which means detector scheduling still matters at tankobon scale. A typical volume has around 160-180 pages; even a now-smaller page-level cost is worth batching and pipelining when multiplied across the volume.
+
+So the revised boundary is:
+
+- Public/stable DMZ: OCR crop inference artifact and adapters.
+- Internal mokuro boundary: page image batch -> page layout results.
+- Internal reconstruction boundary: page layout results -> OCR crop requests -> page JSON.
+
+The external API surface does not need to change for detector batching. We should first add an internal decoupling stage that lets mokuro batch pages through the detector/YOLOv5 path, then run the existing per-page crop extraction and OCR request collection from cached layout results.
+
 ## Why This Boundary
 
 The current hot path is:
@@ -31,12 +42,12 @@ The current hot path is:
 2. `MangaPageOcr.__call__(...)` loads one page, runs the detector, splits lines into crops/chunks, and calls OCR once per crop in `mokuro/manga_page_ocr.py`.
 3. The upstream `manga_ocr.MangaOcr` wrapper performs single-image generation.
 
-The OCR model is the expensive and batchable part: roughly 111M loaded parameters, with autoregressive generation per crop. The detector is not free, but it is not the first DMZ candidate.
+The OCR model is still the main public DMZ candidate: roughly 111M loaded parameters, with autoregressive generation per crop. The detector should remain a mokuro-owned subsystem because its output is masks and `TextBlock`-style layout objects, but its execution should be separable from one-page-at-a-time OCR. The detector model forward is batch-capable; the current single-image constraint is in mokuro/submodule wrapper post-processing and orchestration.
 
 The core design is therefore:
 
 ```text
-mokuro preprocess/layout -> OCR batch artifact or sync batch call -> inference engine -> OCR results -> mokuro postprocess/output
+mokuro page loading -> internal layout batch -> OCR batch artifact or sync batch call -> inference engine -> OCR results -> mokuro postprocess/output
 ```
 
 ## Native Batch Artifact
@@ -156,6 +167,41 @@ Acceptance criteria:
 - A split-line test proves chunks concatenate in `chunk` order, not result order.
 
 Complexity: low to moderate.
+
+### Stage 1A: Decouple Page Layout From OCR
+
+User-facing value:
+
+- No new CLI surface, but unlocks detector batching and clearer profiling.
+- Makes it possible to run detection/layout across many pages before OCR crop inference.
+- Keeps the public OCR artifact focused on crops rather than detector internals.
+
+Implementation:
+
+- Split `MangaPageOcr.__call__` into three internal phases:
+  - load page and run text detection/layout,
+  - extract OCR crop jobs from a page layout result,
+  - reconstruct page JSON from OCR results.
+- Introduce an internal page layout result object that holds image dimensions, detector masks needed for crop extraction, and `TextBlock` data.
+- Keep this layout result internal at first; it is not the stable export/import artifact.
+- Add a detector backend interface with a single-page method first and a batch method next:
+
+```python
+detect_page(image) -> PageLayout
+detect_pages(images: list[np.ndarray]) -> list[PageLayout]
+```
+
+- Implement the initial backend with the current `TextDetector`.
+- Then lift the current single-image wrapper into batched forward plus per-image postprocess: stack letterboxed page tensors, call `self.net(batch)`, loop each batch item through NMS, DB contour extraction, mask resize, `group_output(...)`, and `refine_mask(...)`.
+
+Acceptance criteria:
+
+- Existing fixture tests pass with the single-page layout backend.
+- A fake detector backend can return layouts without importing `manga_ocr`.
+- A batch detector smoke test proves page order is preserved even if postprocess is per-image.
+- `force_cpu` still disables CUDA/MPS for both OCR and detection.
+
+Complexity: moderate.
 
 ### Stage 2: Local Artifact Export and Import
 
@@ -289,18 +335,25 @@ Complexity: bounded spike first, then moderate to high if plugin work is justifi
 
 User-facing value:
 
-- Higher throughput on large volumes by giving engines more crops at once.
+- Higher throughput on large volumes by giving engines more pages/crops at once.
 - Better hardware utilization for offline jobs.
 
 Implementation:
 
-- Change orchestration so export can collect requests across many pages before inference.
+- Change orchestration so mokuro can process volumes in phases:
+  - load pages,
+  - batch detector/page layout,
+  - collect OCR crop requests across pages,
+  - run OCR inference or export artifacts,
+  - import/reconstruct page JSON.
 - Keep page-level cache semantics during import.
 - Add progress that distinguishes detection/export, inference, and import.
+- Tune detector and OCR batch sizes separately. Detector batches are page tensors around the configured detector input size; OCR batches are 224x224 crop tensors or engine-specific image requests.
 
 Acceptance criteria:
 
 - A volume-level batch can be exported and imported.
+- A volume-level run can batch detector forward passes without changing the OCR artifact schema.
 - Partial results can be imported for completed pages.
 - Existing per-page cache behavior still works for sync mode.
 
@@ -309,6 +362,7 @@ Complexity: moderate to high.
 ## Explicit Non-Goals For The First Pass
 
 - Do not externalize text detection.
+- Do not make detector masks, YOLO outputs, or `TextBlock` internals part of the stable public OCR artifact in the first pass.
 - Do not require vLLM for normal mokuro usage.
 - Do not require S3, HTTP, or remote services.
 - Do not redesign the `.mokuro` output format.
@@ -327,10 +381,11 @@ Complexity: moderate to high.
 ## Key Files To Refactor
 
 - `mokuro/manga_page_ocr.py`
-  - Split page preprocessing, request collection, backend dispatch, and result reconstruction.
+  - Split page layout/detection, request collection, backend dispatch, and result reconstruction.
   - Keep `split_into_chunks(...)` in mokuro.
 - `mokuro/mokuro_generator.py`
   - Add sync/export/import orchestration.
+  - Add volume-phase orchestration so detector batches are not forced to follow OCR crop calls page by page.
   - Keep cache writes deterministic.
 - `mokuro/run.py`
   - Add user-facing mode and backend options.
@@ -340,6 +395,11 @@ Complexity: moderate to high.
   - backend factory
   - local backend
   - OpenAI/vLLM batch converters
+- New internal layout modules, likely under `mokuro/layout/`
+  - page layout contract
+  - detector backend wrapper
+  - optional batched detector runner
+  - conversion from page layout to OCR crop requests
 
 ## Minimal Useful End State
 

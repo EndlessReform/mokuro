@@ -11,11 +11,17 @@ from mokuro.volume import Volume
 
 class MokuroGenerator:
     def __init__(
-        self, pretrained_model_name_or_path="kha-white/manga-ocr-base", force_cpu=False, disable_ocr=False, **kwargs
+        self,
+        pretrained_model_name_or_path="kha-white/manga-ocr-base",
+        force_cpu=False,
+        disable_ocr=False,
+        timings_fh=None,
+        **kwargs,
     ):
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
         self.force_cpu = force_cpu
         self.disable_ocr = disable_ocr
+        self.timings_fh = timings_fh
         self.kwargs = kwargs
         self.mpocr = None
 
@@ -28,11 +34,11 @@ class MokuroGenerator:
                 **self.kwargs,
             )
 
-    def process_volume(self, volume: Volume, ignore_errors=False, no_cache=False):
+    def process_volume(self, volume: Volume, ignore_errors=False, no_cache=False, page_limit=None):
         volume.path_ocr_cache.mkdir(parents=True, exist_ok=True)
 
         if volume.mokuro_data is not None:
-            for page in volume.mokuro_data["pages"]:
+            for page in volume.mokuro_data["pages"][:page_limit]:
                 json_path = (volume.path_ocr_cache / page["img_path"]).with_suffix(".json")
                 if json_path.is_file():
                     continue
@@ -42,8 +48,9 @@ class MokuroGenerator:
                 dump_json(page, json_path)
 
         img_paths = volume.get_img_paths()
+        img_path_items = list(img_paths.values())[:page_limit]
 
-        for img_path_rel in tqdm(img_paths.values(), desc="Processing pages..."):
+        for page_idx, img_path_rel in enumerate(tqdm(img_path_items, desc="Processing pages...")):
             try:
                 json_path = (volume.path_ocr_cache / img_path_rel).with_suffix(".json")
 
@@ -55,7 +62,11 @@ class MokuroGenerator:
 
                 if no_cache or not already_processed:
                     self.init_models()
-                    result = self.mpocr(volume.path_in / img_path_rel)
+                    result = self.mpocr(
+                        volume.path_in / img_path_rel,
+                        page_idx=page_idx,
+                        timings_fh=self.timings_fh,
+                    )
                     json_path.parent.mkdir(parents=True, exist_ok=True)
                     dump_json(result, json_path)
             except Exception as e:
@@ -64,11 +75,11 @@ class MokuroGenerator:
                 else:
                     raise e
 
-        self.generate_mokuro_file(volume, ignore_errors=ignore_errors)
+        self.generate_mokuro_file(volume, ignore_errors=ignore_errors, page_limit=page_limit)
 
     @staticmethod
-    def generate_mokuro_file(volume: Volume, ignore_errors=False):
-        json_paths = volume.get_json_paths()
+    def generate_mokuro_file(volume: Volume, ignore_errors=False, page_limit=None):
+        json_paths = dict(list(volume.get_json_paths().items())[:page_limit])
         img_paths = volume.get_img_paths()
 
         out = {
