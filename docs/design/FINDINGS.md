@@ -6,6 +6,8 @@ The normal `python -m mokuro ./tests/data/input/test0` path is a serial page loo
 
 The current OCR path does not take advantage of batching. It calls upstream `manga_ocr.MangaOcr.__call__` once per crop, and that wrapper always constructs a batch of exactly one image before `model.generate(...)`.
 
+The detector path also deserves first-class attention on macOS. Mokuro currently sends detection to CUDA when available, otherwise CPU; it does not choose MPS. The detector model itself is ordinary torch and its raw forward pass works with both MPS and batched tensors, so the hard part is not CUDA-specific kernels. The work is mostly exposing MPS in device selection and, for batching, lifting the single-image inference wrapper/postprocess into a batched forward plus per-image reconstruction loop.
+
 Swapping the OCR backend is feasible and fairly local if the replacement exposes the same "image crop in, text out" shape. Swapping in a batched backend, an MLX implementation, or a remote API would be moderate work because the current code assumes synchronous per-crop calls and performs crop ordering, vertical rotation, chunk concatenation, and post-processing inline inside `MangaPageOcr.__call__`.
 
 ## Entry Point And Loop
@@ -52,6 +54,61 @@ The detector implementation is torch by default for `.pt` weights, with an OpenC
 - `comic_text_detector/basemodel.py:240-244`: `TextDetBase.forward` runs block detection, segmentation, and DB text-line detection.
 
 So the detector is a bundled comic text detector made of a YOLOv5 block detector plus segmentation/DB heads, not the manga OCR transformer model.
+
+### Text Detection Reassessment
+
+The earlier findings underweighted detector cost on macOS. Mokuro currently only moves detection to CUDA:
+
+```python
+cuda = torch.cuda.is_available()
+device = "cuda" if cuda and not force_cpu else "cpu"
+```
+
+That means Apple Silicon runs text detection on CPU even when MPS is available. OCR is different: upstream `manga_ocr.MangaOcr` already chooses CUDA, then MPS, then CPU. So on macOS the current pipeline can easily become "MPS OCR behind CPU segmentation/detection", which matches the Metal flamegraph concern.
+
+The detector forward pass is not CUDA-specific. The submodule uses ordinary torch modules:
+
+- YOLOv5-style conv backbone and `Detect` head.
+- U-Net-like segmentation head using `Conv2d`, `BatchNorm2d`, `C3`, `ConvTranspose2d`, `ReLU`, and `Sigmoid`.
+- DB text-line head using the same basic torch ops.
+- Post-processing with `torchvision.ops.nms`, OpenCV contour/mask operations, pyclipper, and shapely.
+
+There are no custom CUDA extensions, Triton kernels, cupy kernels, or handwritten device kernels in the inference path. The CUDA-specific code is mostly in training scripts or old device defaults.
+
+The raw torch detector forward is batch-capable. A smoke test against the cached detector weights with a `(2, 3, 1024, 1024)` tensor returned:
+
+```text
+blks  (2, 64512, 7)
+mask  (2, 1, 1024, 1024)
+lines (2, 2, 1024, 1024)
+```
+
+The same raw forward also ran on MPS without unsupported-op failures in this environment (`torch 2.12.0`, MPS built and available).
+
+The public `TextDetector.__call__` wrapper is still single-image:
+
+- `preprocess_img(...)` accepts one image and creates a batch of one.
+- `postprocess_yolo(...)` calls `non_max_suppression(...)[0]`, selecting one image's detections.
+- line extraction later indexes `scores[0]` and `lines[0]`.
+- resizing ratios, mask resize, `group_output(...)`, and `refine_mask(...)` are all for one original image.
+
+So this is not ragged-batch hell in the model. It is a regular batched model followed by per-image post-processing and per-image page geometry. A batched detector path would need to stack preprocessed pages, call `self.net(batch)`, then loop over batch items for NMS, DB contour extraction, mask resize, grouping, and refinement.
+
+Local timings were only smoke tests, but they make the direction clear:
+
+```text
+raw forward, warmed:
+  CPU bs=1: 0.372 s/page
+  CPU bs=4: 0.222 s/page
+  MPS bs=1: 0.082 s/page
+  MPS bs=4: 0.078 s/page
+
+full TextDetector.__call__, warmed on tests/data/input/test0/vol1/000a.jpg:
+  CPU: 0.404 s/page
+  MPS: 0.108 s/page
+```
+
+The biggest near-term macOS win is therefore simply allowing detector MPS. Detection batching is still plausible and likely useful for throughput, but on MPS the forward-only per-image gain from batch size 4 was small in this quick test. The value of batching is more about amortizing Python/framework overhead and keeping the device fed across a volume than about fixing an impossible tensor shape.
 
 ### OCR
 
