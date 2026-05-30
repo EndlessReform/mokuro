@@ -29,6 +29,7 @@ def run(
     page_limit: Optional[int] = None,
     ocr_num_beams: Optional[int] = None,
     dev_repeat_ocr_batch_size: int = 1,
+    detector_batch_size: int = 4,
 ):
     """
     Process manga volumes with mokuro.
@@ -50,6 +51,7 @@ def run(
         page_limit: Process only the first N pages of each volume. If None, process all pages.
         ocr_num_beams: Override the OCR model beam count passed to transformers generate(). If None, use the model generation config.
         dev_repeat_ocr_batch_size: DEV ONLY. Artificially batch each OCR crop by repeating it N times, return only the first decoded output, and discard the rest. This is a smoke-test knob for generation batching overhead, not a real batching implementation.
+        detector_batch_size: Number of uncached pages to run through the text detector in one batch.
     """
 
     if version:
@@ -64,6 +66,9 @@ def run(
 
     if dev_repeat_ocr_batch_size < 1:
         raise ValueError("dev_repeat_ocr_batch_size must be at least 1")
+
+    if detector_batch_size < 1:
+        raise ValueError("detector_batch_size must be at least 1")
 
     if disable_ocr:
         logger.info("Running with OCR disabled")
@@ -149,6 +154,7 @@ def run(
         timings_fh=timings_fh,
         ocr_num_beams=ocr_num_beams,
         dev_repeat_ocr_batch_size=dev_repeat_ocr_batch_size,
+        detector_batch_size=detector_batch_size,
     )
 
     try:

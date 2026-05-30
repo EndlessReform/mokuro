@@ -1,7 +1,9 @@
 import cv2
+import copy
 import json
 import time
 import numpy as np
+from dataclasses import dataclass
 from PIL import Image
 from loguru import logger
 from scipy.signal.windows import gaussian
@@ -13,6 +15,40 @@ from mokuro import __version__
 from mokuro.cache import cache
 from mokuro.utils import imread
 import torch
+
+
+@dataclass
+class PageLayout:
+    img: np.ndarray
+    img_width: int
+    img_height: int
+    mask: np.ndarray | None
+    mask_refined: np.ndarray | None
+    blk_list: list
+
+
+@dataclass(frozen=True)
+class OcrCropRequest:
+    page_idx: int
+    blk_idx: int
+    line_idx: int
+    chunk_idx: int
+    img: Image.Image
+    crop_h: int
+    crop_w: int
+
+
+@dataclass(frozen=True)
+class OcrCropResult:
+    page_idx: int
+    blk_idx: int
+    line_idx: int
+    chunk_idx: int
+    text: str
+    crop_h: int | None = None
+    crop_w: int | None = None
+    elapsed_ms: float | None = None
+    tokens: int | None = None
 
 
 class InvalidImage(Exception):
@@ -33,6 +69,7 @@ class MangaPageOcr:
         disable_ocr=False,
         ocr_num_beams=None,
         dev_repeat_ocr_batch_size=1,
+        detector_batch_size=4,
     ):
         self.text_height = text_height
         self.max_ratio_vert = max_ratio_vert
@@ -41,12 +78,16 @@ class MangaPageOcr:
         self.disable_ocr = disable_ocr
         self.ocr_num_beams = ocr_num_beams
         self.dev_repeat_ocr_batch_size = dev_repeat_ocr_batch_size
+        self.detector_batch_size = detector_batch_size
 
         if self.ocr_num_beams is not None and self.ocr_num_beams < 1:
             raise ValueError("ocr_num_beams must be at least 1")
 
         if self.dev_repeat_ocr_batch_size < 1:
             raise ValueError("dev_repeat_ocr_batch_size must be at least 1")
+
+        if self.detector_batch_size < 1:
+            raise ValueError("detector_batch_size must be at least 1")
 
         if not self.disable_ocr:
             if self.dev_repeat_ocr_batch_size > 1:
@@ -67,17 +108,161 @@ class MangaPageOcr:
             self.mocr = MangaOcr(pretrained_model_name_or_path, force_cpu)
 
     def __call__(self, img_path, page_idx=0, timings_fh=None):
+        return self.process_pages([img_path], page_indices=[page_idx], timings_fh=timings_fh)[0]
+
+    def process_pages(self, img_paths, page_indices=None, timings_fh=None):
+        if page_indices is None:
+            page_indices = list(range(len(img_paths)))
+        if len(img_paths) != len(page_indices):
+            raise ValueError("img_paths and page_indices must have the same length")
+
+        layouts = [self.load_page_layout(img_path) for img_path in img_paths]
+        if self.disable_ocr:
+            return [self._empty_page_result(layout) for layout in layouts]
+
+        layouts = self.detect_pages(layouts)
+        return [
+            self._recognize_page_layout(layout, page_idx=page_idx, timings_fh=timings_fh)
+            for layout, page_idx in zip(layouts, page_indices)
+        ]
+
+    def load_page_layout(self, img_path):
         img = imread(img_path)
         if img is None:
             raise InvalidImage()
         H, W, *_ = img.shape
-        result = {"version": __version__, "img_width": W, "img_height": H, "blocks": []}
+        return PageLayout(img=img, img_width=W, img_height=H, mask=None, mask_refined=None, blk_list=[])
 
-        if self.disable_ocr:
+    def detect_page(self, layout):
+        mask, mask_refined, blk_list = self.text_detector(layout.img, refine_mode=1, keep_undetected_mask=True)
+        return PageLayout(
+            img=layout.img,
+            img_width=layout.img_width,
+            img_height=layout.img_height,
+            mask=mask,
+            mask_refined=mask_refined,
+            blk_list=blk_list,
+        )
+
+    def detect_pages(self, layouts):
+        if not layouts:
+            return []
+
+        if hasattr(self.text_detector, "detect_batch"):
+            detector_results = self.text_detector.detect_batch(
+                [layout.img for layout in layouts],
+                refine_mode=1,
+                keep_undetected_mask=True,
+            )
+            return [
+                PageLayout(
+                    img=layout.img,
+                    img_width=layout.img_width,
+                    img_height=layout.img_height,
+                    mask=mask,
+                    mask_refined=mask_refined,
+                    blk_list=blk_list,
+                )
+                for layout, (mask, mask_refined, blk_list) in zip(layouts, detector_results)
+            ]
+
+        return [self.detect_page(layout) for layout in layouts]
+
+    def _recognize_page_layout(self, layout, page_idx=0, timings_fh=None):
+        page_result, requests = self._collect_ocr_crop_requests(layout, page_idx)
+        results = self._recognize_crop_requests(requests)
+        if timings_fh is not None:
+            for result in results:
+                self._write_timing(result, timings_fh)
+        return self._reconstruct_page_result(layout, results, page_result=page_result)
+
+    def _collect_ocr_crop_requests(self, layout, page_idx):
+        page_result = self._empty_page_result(layout)
+        requests = []
+        for blk_idx, blk in enumerate(layout.blk_list):
+            result_blk = {
+                "box": list(blk.xyxy),
+                "vertical": blk.vertical,
+                "font_size": blk.font_size,
+                "lines_coords": [],
+                "lines": [],
+            }
+
+            for line_idx, _line in enumerate(blk.lines_array()):
+                max_ratio = self.max_ratio_vert if blk.vertical else self.max_ratio_hor
+                line_crops, _cut_points = self.split_into_chunks(
+                    layout.img,
+                    layout.mask_refined,
+                    blk,
+                    line_idx,
+                    textheight=self.text_height,
+                    max_ratio=max_ratio,
+                    anchor_window=self.anchor_window,
+                )
+                result_blk["lines_coords"].append(blk.lines_array()[line_idx].tolist())
+                result_blk["lines"].append("")
+
+                for chunk_idx, line_crop in enumerate(line_crops):
+                    crop_h, crop_w = line_crop.shape[:2]
+                    if blk.vertical:
+                        line_crop = cv2.rotate(line_crop, cv2.ROTATE_90_CLOCKWISE)
+
+                    requests.append(
+                        OcrCropRequest(
+                            page_idx=page_idx,
+                            blk_idx=blk_idx,
+                            line_idx=line_idx,
+                            chunk_idx=chunk_idx,
+                            img=Image.fromarray(line_crop),
+                            crop_h=crop_h,
+                            crop_w=crop_w,
+                        )
+                    )
+            page_result["blocks"].append(result_blk)
+        return page_result, requests
+
+    def _recognize_crop_requests(self, requests):
+        results = []
+        for request in requests:
+            t0 = time.perf_counter()
+            chunk_text = self._recognize_crop(request.img)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            num_tokens = len(self.mocr.tokenizer.encode(chunk_text)) - 2  # subtract CLS/SEP
+            results.append(
+                OcrCropResult(
+                    page_idx=request.page_idx,
+                    blk_idx=request.blk_idx,
+                    line_idx=request.line_idx,
+                    chunk_idx=request.chunk_idx,
+                    text=chunk_text,
+                    crop_h=request.crop_h,
+                    crop_w=request.crop_w,
+                    elapsed_ms=elapsed_ms,
+                    tokens=num_tokens,
+                )
+            )
+        return results
+
+    @staticmethod
+    def _empty_page_result(layout):
+        return {"version": __version__, "img_width": layout.img_width, "img_height": layout.img_height, "blocks": []}
+
+    @staticmethod
+    def _reconstruct_page_result(layout, crop_results, page_result=None):
+        result = copy.deepcopy(page_result) if page_result is not None else MangaPageOcr._empty_page_result(layout)
+        line_texts = {}
+
+        for crop_result in sorted(crop_results, key=lambda r: (r.blk_idx, r.line_idx, r.chunk_idx)):
+            line_texts.setdefault((crop_result.blk_idx, crop_result.line_idx), "")
+            line_texts[(crop_result.blk_idx, crop_result.line_idx)] += crop_result.text
+
+        if page_result is not None:
+            for blk_idx, result_blk in enumerate(result["blocks"]):
+                for line_idx in range(len(result_blk["lines"])):
+                    result_blk["lines"][line_idx] = line_texts.get((blk_idx, line_idx), "")
             return result
 
-        mask, mask_refined, blk_list = self.text_detector(img, refine_mode=1, keep_undetected_mask=True)
-        for blk_idx, blk in enumerate(blk_list):
+        for blk_idx, blk in enumerate(layout.blk_list):
             result_blk = {
                 "box": list(blk.xyxy),
                 "vertical": blk.vertical,
@@ -87,57 +272,29 @@ class MangaPageOcr:
             }
 
             for line_idx, line in enumerate(blk.lines_array()):
-                if blk.vertical:
-                    max_ratio = self.max_ratio_vert
-                else:
-                    max_ratio = self.max_ratio_hor
-
-                line_crops, cut_points = self.split_into_chunks(
-                    img,
-                    mask_refined,
-                    blk,
-                    line_idx,
-                    textheight=self.text_height,
-                    max_ratio=max_ratio,
-                    anchor_window=self.anchor_window,
-                )
-
-                line_text = ""
-                for chunk_idx, line_crop in enumerate(line_crops):
-                    crop_h, crop_w = line_crop.shape[:2]
-                    if blk.vertical:
-                        line_crop = cv2.rotate(line_crop, cv2.ROTATE_90_CLOCKWISE)
-
-                    t0 = time.perf_counter()
-                    chunk_text = self._recognize_crop(Image.fromarray(line_crop))
-                    elapsed_ms = (time.perf_counter() - t0) * 1000
-
-                    if timings_fh is not None:
-                        num_tokens = len(self.mocr.tokenizer.encode(chunk_text)) - 2  # subtract CLS/SEP
-                        timings_fh.write(
-                            json.dumps({
-                                "page": page_idx,
-                                "blk": blk_idx,
-                                "line": line_idx,
-                                "chunk": chunk_idx,
-                                "crop_h": crop_h,
-                                "crop_w": crop_w,
-                                "area": crop_h * crop_w,
-                                "aspect": round(crop_w / crop_h, 2) if crop_h else 0,
-                                "tokens": num_tokens,
-                                "ocr_ms": round(elapsed_ms, 1),
-                                "ocr_batch_size": self.dev_repeat_ocr_batch_size,
-                            }) + "\n"
-                        )
-
-                    line_text += chunk_text
-
                 result_blk["lines_coords"].append(line.tolist())
-                result_blk["lines"].append(line_text)
+                result_blk["lines"].append(line_texts.get((blk_idx, line_idx), ""))
 
             result["blocks"].append(result_blk)
 
         return result
+
+    def _write_timing(self, result, timings_fh):
+        timings_fh.write(
+            json.dumps({
+                "page": result.page_idx,
+                "blk": result.blk_idx,
+                "line": result.line_idx,
+                "chunk": result.chunk_idx,
+                "crop_h": result.crop_h,
+                "crop_w": result.crop_w,
+                "area": result.crop_h * result.crop_w,
+                "aspect": round(result.crop_w / result.crop_h, 2) if result.crop_h else 0,
+                "tokens": result.tokens,
+                "ocr_ms": round(result.elapsed_ms, 1),
+                "ocr_batch_size": self.dev_repeat_ocr_batch_size,
+            }) + "\n"
+        )
 
     def _recognize_crop(self, img):
         if self.dev_repeat_ocr_batch_size == 1 and self.ocr_num_beams is None:

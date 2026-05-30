@@ -49,6 +49,7 @@ class MokuroGenerator:
 
         img_paths = volume.get_img_paths()
         img_path_items = list(img_paths.values())[:page_limit]
+        pending_pages = []
 
         for page_idx, img_path_rel in enumerate(tqdm(img_path_items, desc="Processing pages...")):
             try:
@@ -62,20 +63,49 @@ class MokuroGenerator:
 
                 if no_cache or not already_processed:
                     self.init_models()
-                    result = self.mpocr(
-                        volume.path_in / img_path_rel,
-                        page_idx=page_idx,
-                        timings_fh=self.timings_fh,
-                    )
-                    json_path.parent.mkdir(parents=True, exist_ok=True)
-                    dump_json(result, json_path)
+                    pending_pages.append((page_idx, img_path_rel, json_path))
+                    if len(pending_pages) >= self.mpocr.detector_batch_size:
+                        self._process_pending_pages(volume, pending_pages, ignore_errors=ignore_errors)
+                        pending_pages = []
             except Exception as e:
                 if ignore_errors:
                     logger.error(e)
                 else:
                     raise e
 
+        if pending_pages:
+            self._process_pending_pages(volume, pending_pages, ignore_errors=ignore_errors)
+
         self.generate_mokuro_file(volume, ignore_errors=ignore_errors, page_limit=page_limit)
+
+    def _process_pending_pages(self, volume, pending_pages, ignore_errors=False):
+        img_paths = [volume.path_in / img_path_rel for _page_idx, img_path_rel, _json_path in pending_pages]
+        page_indices = [page_idx for page_idx, _img_path_rel, _json_path in pending_pages]
+        json_paths = [json_path for _page_idx, _img_path_rel, json_path in pending_pages]
+
+        try:
+            results = self.mpocr.process_pages(img_paths, page_indices=page_indices, timings_fh=self.timings_fh)
+        except Exception as e:
+            if not ignore_errors:
+                raise e
+            logger.error(e)
+            for page_idx, img_path_rel, json_path in pending_pages:
+                try:
+                    result = self.mpocr(
+                        volume.path_in / img_path_rel,
+                        page_idx=page_idx,
+                        timings_fh=self.timings_fh,
+                    )
+                except Exception as page_error:
+                    logger.error(page_error)
+                else:
+                    json_path.parent.mkdir(parents=True, exist_ok=True)
+                    dump_json(result, json_path)
+            return
+
+        for result, json_path in zip(results, json_paths):
+            json_path.parent.mkdir(parents=True, exist_ok=True)
+            dump_json(result, json_path)
 
     @staticmethod
     def generate_mokuro_file(volume: Volume, ignore_errors=False, page_limit=None):
