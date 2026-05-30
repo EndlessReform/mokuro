@@ -168,6 +168,30 @@ For comparison, the detector bundle at `~/.cache/manga-ocr/comictextdetector.pt`
 - `text_det`: 4,163,314 parameters.
 - Total estimated detector parameters: 23,411,953.
 
+### Layer Depth And Compile Implications
+
+**OCR Model (`kha-white/manga-ocr-base`):**
+
+| Component | Architecture | Layers | Hidden | Heads |
+|-----------|-------------|--------|--------|-------|
+| Encoder | DeiT-base ViT (`facebook/deit-base-patch16-224`) | **12** | 768 | 12 |
+| Decoder | BERT-japanese-char-v2 pruned to decoder | **2** | 768 | 12 |
+
+The encoder is standard narrow-and-deep transformer (768 hidden, 12 layers). The decoder was deliberately pruned from the original bert-base's 12 layers down to **2**, with cross-attention to the ViT features. Very shallow by design.
+
+**Detector (`comictextdetector.pt`):**
+
+| Component | Modules | Conv Layers | Max Channels |
+|-----------|---------|-------------|--------------|
+| YOLOv5s Backbone (truncated at idx 10) | 10 | **31** | 1024 |
+| U-Net Segmentation Head | 7 | **34** | 512 |
+| DB Text-Line Head | 8 | **18** (3 shared w/ U-Net) | 256 |
+| **Total** | **25** | **~83** | |
+
+The backbone provides the bulk of feature extraction depth (31 convs across 4 downsampling stages, C3/Bottleneck residual blocks). The U-Net head is moderately deep with 6 upsampling stages but shallow per-stage (all C3 blocks use n=1). The DB head adds relatively few layers, with 2 stages deep-copied from the U-Net during `initialize_db()`. Overall: moderate depth, moderate width. Neither extreme.
+
+**`torch.compile()` target analysis:** The detector is the clear winner. It runs on CPU on macOS (no MPS), has ~83 small conv/BN/activation ops that compile fuses aggressively, and executes as a single `forward()` graph with no Python interleave. The OCR ViT encoder (12 layers) would benefit moderately but already runs on MPS where gains are smaller. The OCR decoder benefits negligibly — only 2 layers inside `generate()`'s autoregressive Python loop, which compile doesn't eliminate. A drop-in `self.net = torch.compile(self.net)` in `TextDetBase.__init__` is the lowest-effort, highest-impact optimization.
+
 ## How Vanilla Is The Modeling Code?
 
 The modeling code is very vanilla. The preprocessing and page-geometry code is where most of mokuro's complexity lives.
