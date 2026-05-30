@@ -31,6 +31,7 @@ class MangaPageOcr:
         max_ratio_hor=8,
         anchor_window=2,
         disable_ocr=False,
+        ocr_num_beams=None,
         dev_repeat_ocr_batch_size=1,
     ):
         self.text_height = text_height
@@ -38,7 +39,11 @@ class MangaPageOcr:
         self.max_ratio_hor = max_ratio_hor
         self.anchor_window = anchor_window
         self.disable_ocr = disable_ocr
+        self.ocr_num_beams = ocr_num_beams
         self.dev_repeat_ocr_batch_size = dev_repeat_ocr_batch_size
+
+        if self.ocr_num_beams is not None and self.ocr_num_beams < 1:
+            raise ValueError("ocr_num_beams must be at least 1")
 
         if self.dev_repeat_ocr_batch_size < 1:
             raise ValueError("dev_repeat_ocr_batch_size must be at least 1")
@@ -135,13 +140,16 @@ class MangaPageOcr:
         return result
 
     def _recognize_crop(self, img):
-        if self.dev_repeat_ocr_batch_size == 1:
+        if self.dev_repeat_ocr_batch_size == 1 and self.ocr_num_beams is None:
             return self.mocr(img)
 
         img = img.convert("L").convert("RGB")
         x = self.mocr._preprocess(img)
         x = x[None].repeat(self.dev_repeat_ocr_batch_size, 1, 1, 1).to(self.mocr.model.device)
-        x = self.mocr.model.generate(x, max_length=300)[0].cpu()
+        generate_kwargs = {"max_length": 300}
+        if self.ocr_num_beams is not None:
+            generate_kwargs["num_beams"] = self.ocr_num_beams
+        x = self.mocr.model.generate(x, **generate_kwargs)[0].cpu()
         text = self.mocr.tokenizer.decode(x, skip_special_tokens=True)
         return post_process(text)
 

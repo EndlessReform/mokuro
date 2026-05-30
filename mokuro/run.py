@@ -27,6 +27,7 @@ def run(
     version: bool = False,
     timings_file: Optional[Union[str, Path]] = None,
     page_limit: Optional[int] = None,
+    ocr_num_beams: Optional[int] = None,
     dev_repeat_ocr_batch_size: int = 1,
 ):
     """
@@ -47,6 +48,7 @@ def run(
         version: Print the version of mokuro and exit.
         timings_file: Path to a JSONL file to write per-chunk OCR timing records. Each line contains page, block, line, chunk indices plus crop dimensions and OCR latency in milliseconds.
         page_limit: Process only the first N pages of each volume. If None, process all pages.
+        ocr_num_beams: Override the OCR model beam count passed to transformers generate(). If None, use the model generation config.
         dev_repeat_ocr_batch_size: DEV ONLY. Artificially batch each OCR crop by repeating it N times, return only the first decoded output, and discard the rest. This is a smoke-test knob for generation batching overhead, not a real batching implementation.
     """
 
@@ -56,6 +58,9 @@ def run(
 
     if page_limit is not None and page_limit < 0:
         raise ValueError("page_limit must be non-negative")
+
+    if ocr_num_beams is not None and ocr_num_beams < 1:
+        raise ValueError("ocr_num_beams must be at least 1")
 
     if dev_repeat_ocr_batch_size < 1:
         raise ValueError("dev_repeat_ocr_batch_size must be at least 1")
@@ -142,6 +147,7 @@ def run(
         force_cpu=force_cpu,
         disable_ocr=disable_ocr,
         timings_fh=timings_fh,
+        ocr_num_beams=ocr_num_beams,
         dev_repeat_ocr_batch_size=dev_repeat_ocr_batch_size,
     )
 

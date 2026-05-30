@@ -92,7 +92,7 @@ def test_dev_repeat_ocr_batch_size_uses_first_output():
         def __init__(self):
             self.input_shape = None
 
-        def generate(self, x, max_length):
+        def generate(self, x, max_length, **kwargs):
             self.input_shape = tuple(x.shape)
             return torch.tensor([[1, 2, 3], [4, 5, 6]])
 
@@ -113,6 +113,7 @@ def test_dev_repeat_ocr_batch_size_uses_first_output():
             return torch.zeros(3, 2, 2)
 
     mpocr = MangaPageOcr.__new__(MangaPageOcr)
+    mpocr.ocr_num_beams = None
     mpocr.dev_repeat_ocr_batch_size = 2
     mpocr.mocr = FakeMangaOcr()
 
@@ -121,6 +122,40 @@ def test_dev_repeat_ocr_batch_size_uses_first_output():
     assert text
     assert mpocr.mocr.tokenizer.seen_tokens == [1, 2, 3]
     assert mpocr.mocr.model.input_shape == (2, 3, 2, 2)
+
+
+def test_ocr_num_beams_is_passed_to_generate():
+    class FakeModel:
+        device = torch.device("cpu")
+
+        def __init__(self):
+            self.generate_kwargs = None
+
+        def generate(self, x, **kwargs):
+            self.generate_kwargs = kwargs
+            return torch.tensor([[1, 2, 3]])
+
+    class FakeTokenizer:
+        def decode(self, tokens, skip_special_tokens):
+            return "beamed"
+
+    class FakeMangaOcr:
+        def __init__(self):
+            self.model = FakeModel()
+            self.tokenizer = FakeTokenizer()
+
+        def _preprocess(self, img):
+            return torch.zeros(3, 2, 2)
+
+    mpocr = MangaPageOcr.__new__(MangaPageOcr)
+    mpocr.ocr_num_beams = 2
+    mpocr.dev_repeat_ocr_batch_size = 1
+    mpocr.mocr = FakeMangaOcr()
+
+    text = mpocr._recognize_crop(Image.new("RGB", (2, 2)))
+
+    assert text
+    assert mpocr.mocr.model.generate_kwargs == {"max_length": 300, "num_beams": 2}
 
 
 def _setup_and_run(
