@@ -137,3 +137,4 @@ tests/data/input/integration/
 *.pyinstrument.html
 *.jsonl
 *summary.json
+timings
