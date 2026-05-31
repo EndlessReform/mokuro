@@ -2,6 +2,7 @@
 name = "mokuro"
 authors = [
     {name = "Maciej Budyś", email = "kha-white@mail.com"},
+    {name = "Jacob Keisling", email = "contact@keisling.me"},
 ]
 description = "Browser reader for manga with selectable text"
 readme = "README.md"
@@ -33,14 +34,8 @@ dependencies = [
     "yattag",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest",
-    "ruff",
-]
-
 [project.urls]
-Homepage = "https://github.com/kha-white/mokuro"
+Homepage = "https://github.com/EndlessReform/mokuro"
 
 [build-system]
 requires = ["setuptools >= 61.0.0", "setuptools_scm"]
@@ -63,6 +58,8 @@ extend-exclude = ["comic_text_detector", "notebooks"]
 [dependency-groups]
 dev = [
     "pyinstrument>=5.1.2",
+    "pytest",
+    "ruff",
 ]
 
 [project.scripts]

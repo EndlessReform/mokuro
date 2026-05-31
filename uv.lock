@@ -613,15 +613,11 @@ dependencies = [
     { name = "yattag" },
 ]
 
-[package.optional-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "pyinstrument" },
+    { name = "pytest" },
+    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -634,9 +630,7 @@ requires-dist = [
     { name = "opencv-python", specifier = ">=4.1.2" },
     { name = "pillow", specifier = ">=7.1.2" },
     { name = "pyclipper" },
-    { name = "pytest", marker = "extra == 'dev'" },
     { name = "requests" },
-    { name = "ruff", marker = "extra == 'dev'" },
     { name = "scipy" },
     { name = "setuptools", specifier = "<81" },
     { name = "shapely" },
@@ -647,10 +641,13 @@ requires-dist = [
     { name = "transformers", specifier = ">=4.25.0" },
     { name = "yattag" },
 ]
-provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pyinstrument", specifier = ">=5.1.2" }]
+dev = [
+    { name = "pyinstrument", specifier = ">=5.1.2" },
+    { name = "pytest" },
+    { name = "ruff" },
+]
 
 [[package]]
 name = "mpmath"

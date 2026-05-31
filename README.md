@@ -43,11 +43,41 @@ try installing Python from the [official site](https://www.python.org/downloads)
 If you want to run with GPU, install PyTorch as described [here](https://pytorch.org/get-started/locally/#start-locally),
 otherwise this step can be skipped.
 
-Run in command line:
+Install the command line app with [uv](https://docs.astral.sh/uv/):
 
-```commandline
-pip3 install mokuro
+```bash
+uv tool install mokuro
 ```
+
+To upgrade an existing uv tool install:
+
+```bash
+uv tool upgrade mokuro
+```
+
+# Development
+
+This fork uses uv for dependency management and local commands.
+
+Clone the repository with its detector submodule, then create the local environment:
+
+```bash
+git clone --recurse-submodules https://github.com/<your-user>/mokuro.git
+cd mokuro
+uv sync --dev
+```
+
+Run project commands through uv:
+
+```bash
+uv run mokuro /path/to/manga/vol1
+uv run pytest
+uv run ruff check .
+uv run ruff format .
+uv build
+```
+
+`uv.lock` is checked in. Use `uv sync --locked --dev` when you want to verify the current lockfile exactly, and `uv lock` after changing dependencies in `pyproject.toml`.
 
 # Usage
 
