@@ -124,3 +124,31 @@ What it does **not** test:
 - It does not produce better OCR output; the extra decoded strings are thrown away.
 
 Use `--no-cache` when comparing runs, otherwise cached pages will skip OCR and produce no timing rows.
+
+## Detector MLX Fixture
+
+Use the detector fixture dumper when working on the MLX detector port. It records the current Torch detector as plain ndarray artifacts plus final public detector JSON:
+
+```bash
+uv run python -m comic_text_detector.scripts.dump_detector_fixture \
+  --image tests/data/input/test0/vol1/000a.jpg \
+  --batch-image tests/data/input/test0/vol1/001a.jpg \
+  --input-size 1024 \
+  --out /tmp/ctd-fixture
+```
+
+By default, the script uses the same checkpoint mokuro uses: `${XDG_CACHE_HOME:-~/.cache}/manga-ocr/comictextdetector.pt`. If the checkpoint is missing, it downloads mokuro's default detector artifact. Pass `--checkpoint /path/to/comictextdetector.pt` only when testing another detector file.
+
+The output directory contains:
+
+```text
+manifest.json
+single.npz
+batch.npz
+single-final.json
+batch-final.json
+```
+
+`manifest.json` records the checkpoint path and SHA256, image paths and SHA256 values, input size, activation, dtype, device, thresholds, package versions, and the generated split summaries. The `.npz` files contain fixed ndarray values for the framework boundary and postprocess checkpoints, including NCHW/NHWC inputs, resize metadata, selected trunk feature maps, decoded YOLO head output, raw mask/line heads, NMS values/counts, line values/counts, and input-canvas `post.mask_uint8`.
+
+Use CPU for canonical fixtures. The default `--device cpu` and `--torch-threads 1` are chosen for deterministic fixture generation.
