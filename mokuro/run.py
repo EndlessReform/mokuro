@@ -1,4 +1,5 @@
 from collections import Counter
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Sequence, Optional, Union
@@ -10,6 +11,15 @@ from mokuro import MokuroGenerator
 from mokuro import __version__
 from mokuro.legacy.overlay_generator import generate_legacy_html
 from mokuro.volume import VolumeCollection
+
+
+def _coerce_optional_int(value, name):
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{name} must be an integer") from e
 
 
 def run(
@@ -25,6 +35,15 @@ def run(
     legacy_html: bool = True,
     as_one_file: bool = True,
     version: bool = False,
+    timings_file: Optional[Union[str, Path]] = None,
+    ocr_summary_file: Optional[Union[str, Path]] = None,
+    page_limit: Optional[int] = None,
+    ocr_num_beams: Optional[int] = None,
+    ocr_bf16: bool = False,
+    dev_repeat_ocr_batch_size: int = 1,
+    detector_batch_size: int = 4,
+    ocr_batch_size: int = 1,
+    ocr_reorder_buffer_size: Optional[int] = None,
 ):
     """
     Process manga volumes with mokuro.
@@ -42,14 +61,63 @@ def run(
         legacy_html: Enable legacy HTML output. If True, acts as if --unzip is True.
         as_one_file: Applies only to legacy HTML. If False, generate separate CSS and JS files instead of embedding them in the HTML file.
         version: Print the version of mokuro and exit.
+        timings_file: Path to a JSONL file to write per-chunk OCR timing records. Each line contains page, block, line, chunk indices plus crop dimensions and OCR latency in milliseconds.
+        ocr_summary_file: Path to a JSON file to write run-level OCR batch yield and token-raggedness summary statistics.
+        page_limit: Process only the first N pages of each volume. If None, process all pages.
+        ocr_num_beams: Override the OCR model beam count passed to transformers generate(). If None, use the model generation config.
+        ocr_bf16: Cast the OCR model and image inputs to bfloat16 on CUDA/MPS. Ignored on CPU.
+        dev_repeat_ocr_batch_size: DEV ONLY. Artificially batch each OCR crop by repeating it N times, return only the first decoded output, and discard the rest. This is a smoke-test knob for generation batching overhead, not a real batching implementation.
+        detector_batch_size: Number of uncached pages to run through the text detector in one batch.
+        ocr_batch_size: Number of OCR crops to run through decoder generation in one batch.
+        ocr_reorder_buffer_size: Number of OCR crop requests to stage before OCR batching. Reserved for future crop reordering; current behavior preserves request order.
     """
 
     if version:
         print(f"{__version__}")
         return
 
+    page_limit = _coerce_optional_int(page_limit, "page_limit")
+    ocr_num_beams = _coerce_optional_int(ocr_num_beams, "ocr_num_beams")
+    dev_repeat_ocr_batch_size = _coerce_optional_int(
+        dev_repeat_ocr_batch_size, "dev_repeat_ocr_batch_size"
+    )
+    detector_batch_size = _coerce_optional_int(detector_batch_size, "detector_batch_size")
+    ocr_batch_size = _coerce_optional_int(ocr_batch_size, "ocr_batch_size")
+    ocr_reorder_buffer_size = _coerce_optional_int(
+        ocr_reorder_buffer_size, "ocr_reorder_buffer_size"
+    )
+
+    if page_limit is not None and page_limit < 0:
+        raise ValueError("page_limit must be non-negative")
+
+    if ocr_num_beams is not None and ocr_num_beams < 1:
+        raise ValueError("ocr_num_beams must be at least 1")
+
+    if dev_repeat_ocr_batch_size < 1:
+        raise ValueError("dev_repeat_ocr_batch_size must be at least 1")
+
+    if detector_batch_size < 1:
+        raise ValueError("detector_batch_size must be at least 1")
+
+    if ocr_batch_size < 1:
+        raise ValueError("ocr_batch_size must be at least 1")
+
+    if ocr_reorder_buffer_size is not None and ocr_reorder_buffer_size < 1:
+        raise ValueError("ocr_reorder_buffer_size must be at least 1")
+
+    if ocr_reorder_buffer_size is not None and ocr_reorder_buffer_size < ocr_batch_size:
+        raise ValueError("ocr_reorder_buffer_size must be at least ocr_batch_size")
+
+    if dev_repeat_ocr_batch_size > 1 and ocr_batch_size > 1:
+        raise ValueError("dev_repeat_ocr_batch_size cannot be combined with ocr_batch_size > 1")
+
     if disable_ocr:
         logger.info("Running with OCR disabled")
+    elif dev_repeat_ocr_batch_size > 1:
+        logger.warning(
+            "DEV ONLY: --dev-repeat-ocr-batch-size repeats every OCR crop inside one generate() batch "
+            "and discards all but the first output. Do not use for production OCR."
+        )
 
     if legacy_html:
         logger.warning(
@@ -116,34 +184,66 @@ def run(
         if inp.lower() not in ("y", "yes"):
             return
 
+    timings_fh = None
+    if timings_file is not None:
+        timings_fh = open(timings_file, "w", encoding="utf-8")
+
     mg = MokuroGenerator(
-        pretrained_model_name_or_path=pretrained_model_name_or_path, force_cpu=force_cpu, disable_ocr=disable_ocr
+        pretrained_model_name_or_path=pretrained_model_name_or_path,
+        force_cpu=force_cpu,
+        disable_ocr=disable_ocr,
+        timings_fh=timings_fh,
+        ocr_num_beams=ocr_num_beams,
+        ocr_bf16=ocr_bf16,
+        dev_repeat_ocr_batch_size=dev_repeat_ocr_batch_size,
+        detector_batch_size=detector_batch_size,
+        ocr_batch_size=ocr_batch_size,
+        ocr_reorder_buffer_size=ocr_reorder_buffer_size,
     )
 
-    with TemporaryDirectory() as tmp_dir:
-        tmp_dir = Path(tmp_dir)
+    try:
+        with TemporaryDirectory() as tmp_dir:
+            tmp_dir = Path(tmp_dir)
 
-        # unzip == True means that zipped volumes will be unzipped in their original location
-        # in that case, we don't use a temporary directory
-        if unzip:
-            tmp_dir = None
+            # unzip == True means that zipped volumes will be unzipped in their original location
+            # in that case, we don't use a temporary directory
+            if unzip:
+                tmp_dir = None
 
-        num_sucessful = 0
-        for i, volume in enumerate(vc):
-            logger.info(f"Processing {i + 1}/{len(vc)}: {volume.path_in}")
+            num_sucessful = 0
+            for i, volume in enumerate(vc):
+                logger.info(f"Processing {i + 1}/{len(vc)}: {volume.path_in}")
 
-            try:
-                volume.unzip(tmp_dir)
-                mg.process_volume(volume, ignore_errors=ignore_errors, no_cache=no_cache)
-                if legacy_html:
-                    generate_legacy_html(volume, as_one_file=as_one_file, ignore_errors=ignore_errors)
+                try:
+                    volume.unzip(tmp_dir)
+                    mg.process_volume(
+                        volume,
+                        ignore_errors=ignore_errors,
+                        no_cache=no_cache,
+                        page_limit=page_limit,
+                    )
+                    if legacy_html:
+                        generate_legacy_html(volume, as_one_file=as_one_file, ignore_errors=ignore_errors)
 
-            except Exception:
-                logger.exception(f"Error while processing {volume.path_in}")
-            else:
-                num_sucessful += 1
+                except Exception:
+                    logger.exception(f"Error while processing {volume.path_in}")
+                else:
+                    num_sucessful += 1
 
-        logger.info(f"Processed successfully: {num_sucessful}/{len(vc)}")
+            logger.info(f"Processed successfully: {num_sucessful}/{len(vc)}")
+
+            if ocr_summary_file is not None:
+                summary = mg.get_ocr_batch_summary()
+                summary_json = json.dumps(summary, ensure_ascii=False, indent=2) + "\n"
+                if str(ocr_summary_file) == "-":
+                    print(summary_json, end="")
+                else:
+                    ocr_summary_path = Path(ocr_summary_file).expanduser()
+                    ocr_summary_path.parent.mkdir(parents=True, exist_ok=True)
+                    ocr_summary_path.write_text(summary_json, encoding="utf-8")
+    finally:
+        if timings_fh is not None:
+            timings_fh.close()
 
 
 if __name__ == "__main__":

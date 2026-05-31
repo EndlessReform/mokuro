@@ -103,6 +103,28 @@ mokuro --parent_dir manga_title/
 --disable_html: Disable legacy HTML output. If True, acts as if --unzip is True.
 --as_one_file: Applies only to legacy HTML. If False, generate separate CSS and JS files instead of embedding them in the HTML file.
 --version: Print the version of mokuro and exit.
+--page_limit: Process only the first N pages of each volume. If None, process all pages.
+```
+
+## Debug and power-user options
+
+These options are mainly useful for profiling, model experiments, and tuning batch behavior. Defaults are chosen for normal usage, so most users can ignore this section.
+
+```
+--ocr_num_beams: Override the OCR model beam count passed to transformers generate(). If None, use the model generation config.
+--ocr_bf16: Cast the OCR model and image inputs to bfloat16 on CUDA/MPS. Ignored on CPU.
+--detector_batch_size: Number of uncached pages to run through the text detector in one batch.
+--ocr_batch_size: Number of OCR crops to run through decoder generation in one batch.
+--ocr_reorder_buffer_size: Number of OCR crop requests to stage before OCR batching. This is reserved for future crop reordering; current behavior preserves request order.
+--timings_file: Path to a JSONL file with one per-OCR-crop timing/statistics record. Each line includes page/block/line/chunk indices, crop dimensions, token count, OCR latency, and actual OCR batch size.
+--ocr_summary_file: Path to a JSON file with run-level OCR batch summary statistics. This is off by default. The summary includes batches per page, crops per page, batch fill rate, and token raggedness within the actual batches and within each reorder-buffer window.
+--dev_repeat_ocr_batch_size: DEV ONLY. Artificially batch each OCR crop by repeating it N times, return only the first decoded output, and discard the rest. This is a smoke-test knob for generation batching overhead, not a real batching implementation.
+```
+
+Fire also accepts hyphenated option names, for example:
+
+```bash
+mokuro ./vol1 --ocr-bf16 --ocr-batch-size=8 --ocr-reorder-buffer-size=32 --ocr-summary-file=ocr-summary.json
 ```
 
 ## Legacy HTML vs. new .mokuro format

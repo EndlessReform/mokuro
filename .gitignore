@@ -129,3 +129,12 @@ dmypy.json
 .pyre/
 
 .idea/
+
+# Data files
+tests/data/input/integration/
+
+# Instrument files
+*.pyinstrument.html
+*.jsonl
+*summary.json
+timings
