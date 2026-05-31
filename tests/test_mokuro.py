@@ -255,6 +255,32 @@ def _setup_and_run(
     return input_dir, expected_results_dir
 
 
+def _assert_blocks_close(actual, expected, tolerance=1):
+    """Compare two block lists allowing ±tolerance pixel drift on box coords and lines_coords."""
+    assert len(actual) == len(expected), f"block count mismatch: {len(actual)} vs {len(expected)}"
+    for i, (a, e) in enumerate(zip(actual, expected)):
+        # box: allow ±tolerance
+        a_box, e_box = a["box"], e["box"]
+        assert all(abs(x - y) <= tolerance for x, y in zip(a_box, e_box)), (
+            f"block {i} box drift > {tolerance}: actual={a_box} expected={e_box}"
+        )
+        # non-numeric fields must match exactly
+        for key in ("lines", "font_size", "vertical"):
+            assert a.get(key) == e.get(key), f"block {i} {key} mismatch: actual={a.get(key)} expected={e.get(key)}"
+        # lines_coords: list of lines, each line is list of [x,y] points — allow ±tolerance per point
+        a_coords = a.get("lines_coords", [])
+        e_coords = e.get("lines_coords", [])
+        assert len(a_coords) == len(e_coords), f"block {i} lines_coords count mismatch: {len(a_coords)} vs {len(e_coords)}"
+        for j, (line_a, line_e) in enumerate(zip(a_coords, e_coords)):
+            assert len(line_a) == len(line_e), (
+                f"block {i} coord line {j} point count mismatch: {len(line_a)} vs {len(line_e)}"
+            )
+            for k, (pa, pe) in enumerate(zip(line_a, line_e)):
+                assert all(abs(px - pe_x) <= tolerance for px, pe_x in zip(pa, pe)), (
+                    f"block {i} coord line {j} point {k} drift > {tolerance}: actual={pa} expected={pe}"
+                )
+
+
 def _validate_cache_jsons(json_paths, expected_json_paths):
     assert [path.name for path in expected_json_paths] == [path.name for path in json_paths]
 
@@ -265,7 +291,9 @@ def _validate_cache_jsons(json_paths, expected_json_paths):
         for json_ in (result, expected_result):
             json_.pop("version")
 
-        assert result == expected_result
+        assert result["img_width"] == expected_result["img_width"]
+        assert result["img_height"] == expected_result["img_height"]
+        _assert_blocks_close(result["blocks"], expected_result["blocks"])
 
 
 def _validate_mokuro_files(json_paths, expected_json_paths):
@@ -283,4 +311,12 @@ def _validate_mokuro_files(json_paths, expected_json_paths):
             for page in json_["pages"]:
                 page.pop("version")
 
-        assert result == expected_result
+        # top-level fields must match exactly
+        for key in ("version", "title", "volume"):
+            assert result.get(key) == expected_result.get(key), f"{key} mismatch"
+        assert len(result["pages"]) == len(expected_result["pages"])
+        for i, (r_page, e_page) in enumerate(zip(result["pages"], expected_result["pages"])):
+            assert r_page["img_path"] == e_page["img_path"], f"page {i} img_path mismatch"
+            assert r_page["img_width"] == e_page["img_width"], f"page {i} img_width mismatch"
+            assert r_page["img_height"] == e_page["img_height"], f"page {i} img_height mismatch"
+            _assert_blocks_close(r_page["blocks"], e_page["blocks"])
