@@ -4,7 +4,7 @@ from loguru import logger
 from tqdm import tqdm
 
 from mokuro import __version__
-from mokuro.manga_page_ocr import MangaPageOcr
+from mokuro.manga_page_ocr import MangaPageOcr, summarize_ocr_batch_stats
 from mokuro.utils import dump_json, load_json
 from mokuro.volume import Volume
 
@@ -33,6 +33,22 @@ class MokuroGenerator:
                 disable_ocr=self.disable_ocr,
                 **self.kwargs,
             )
+
+    def get_ocr_batch_summary(self):
+        if self.mpocr is not None:
+            return self.mpocr.get_ocr_batch_summary()
+
+        ocr_batch_size = self.kwargs.get("ocr_batch_size", 1)
+        return summarize_ocr_batch_stats(
+            {"pages": [], "batches": [], "reorder_buffers": []},
+            {
+                "ocr_batch_size": ocr_batch_size,
+                "ocr_reorder_buffer_size": self.kwargs.get("ocr_reorder_buffer_size") or ocr_batch_size,
+                "ocr_bf16": self.kwargs.get("ocr_bf16", False),
+                "scope": "detector_batch_sync",
+                "reordering": "disabled",
+            },
+        )
 
     def process_volume(self, volume: Volume, ignore_errors=False, no_cache=False, page_limit=None):
         volume.path_ocr_cache.mkdir(parents=True, exist_ok=True)

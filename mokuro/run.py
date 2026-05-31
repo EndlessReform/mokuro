@@ -1,4 +1,5 @@
 from collections import Counter
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Sequence, Optional, Union
@@ -35,8 +36,10 @@ def run(
     as_one_file: bool = True,
     version: bool = False,
     timings_file: Optional[Union[str, Path]] = None,
+    ocr_summary_file: Optional[Union[str, Path]] = None,
     page_limit: Optional[int] = None,
     ocr_num_beams: Optional[int] = None,
+    ocr_bf16: bool = False,
     dev_repeat_ocr_batch_size: int = 1,
     detector_batch_size: int = 4,
     ocr_batch_size: int = 1,
@@ -59,8 +62,10 @@ def run(
         as_one_file: Applies only to legacy HTML. If False, generate separate CSS and JS files instead of embedding them in the HTML file.
         version: Print the version of mokuro and exit.
         timings_file: Path to a JSONL file to write per-chunk OCR timing records. Each line contains page, block, line, chunk indices plus crop dimensions and OCR latency in milliseconds.
+        ocr_summary_file: Path to a JSON file to write run-level OCR batch yield and token-raggedness summary statistics.
         page_limit: Process only the first N pages of each volume. If None, process all pages.
         ocr_num_beams: Override the OCR model beam count passed to transformers generate(). If None, use the model generation config.
+        ocr_bf16: Cast the OCR model and image inputs to bfloat16 on CUDA/MPS. Ignored on CPU.
         dev_repeat_ocr_batch_size: DEV ONLY. Artificially batch each OCR crop by repeating it N times, return only the first decoded output, and discard the rest. This is a smoke-test knob for generation batching overhead, not a real batching implementation.
         detector_batch_size: Number of uncached pages to run through the text detector in one batch.
         ocr_batch_size: Number of OCR crops to run through decoder generation in one batch.
@@ -189,6 +194,7 @@ def run(
         disable_ocr=disable_ocr,
         timings_fh=timings_fh,
         ocr_num_beams=ocr_num_beams,
+        ocr_bf16=ocr_bf16,
         dev_repeat_ocr_batch_size=dev_repeat_ocr_batch_size,
         detector_batch_size=detector_batch_size,
         ocr_batch_size=ocr_batch_size,
@@ -225,6 +231,16 @@ def run(
                     num_sucessful += 1
 
             logger.info(f"Processed successfully: {num_sucessful}/{len(vc)}")
+
+            if ocr_summary_file is not None:
+                summary = mg.get_ocr_batch_summary()
+                summary_json = json.dumps(summary, ensure_ascii=False, indent=2) + "\n"
+                if str(ocr_summary_file) == "-":
+                    print(summary_json, end="")
+                else:
+                    ocr_summary_path = Path(ocr_summary_file).expanduser()
+                    ocr_summary_path.parent.mkdir(parents=True, exist_ok=True)
+                    ocr_summary_path.write_text(summary_json, encoding="utf-8")
     finally:
         if timings_fh is not None:
             timings_fh.close()

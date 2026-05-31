@@ -87,6 +87,7 @@ def test_page_limit(tmp_path, input_data_root):
 
 def test_cli_int_options_accept_string_values(tmp_path, input_data_root):
     input_dir = tmp_path / "test0"
+    ocr_summary_file = tmp_path / "ocr-summary.json"
     shutil.copytree(input_data_root / "test0", input_dir)
 
     run(
@@ -101,10 +102,15 @@ def test_cli_int_options_accept_string_values(tmp_path, input_data_root):
         detector_batch_size="2",
         ocr_batch_size="2",
         ocr_reorder_buffer_size="4",
+        ocr_summary_file=ocr_summary_file,
     )
 
     json_paths = sorted((input_dir / "_ocr/vol1").iterdir())
     assert [path.name for path in json_paths] == ["000a.json", "000b.json"]
+    ocr_summary = json.loads(ocr_summary_file.read_text(encoding="utf-8"))
+    assert ocr_summary["schema"] == "mokuro.ocr_batch_summary.v1"
+    assert ocr_summary["config"]["ocr_batch_size"] == 2
+    assert ocr_summary["totals"] == {"pages": 0, "crops": 0, "batches": 0, "reorder_buffers": 0}
 
 
 def test_dev_repeat_ocr_batch_size_uses_first_output():
@@ -178,6 +184,44 @@ def test_ocr_num_beams_is_passed_to_generate():
 
     assert text
     assert mpocr.mocr.model.generate_kwargs == {"max_length": 300, "num_beams": 2}
+
+
+def test_ocr_bf16_single_crop_uses_bfloat16_generate_path():
+    class FakeModel:
+        device = torch.device("cpu")
+
+        def __init__(self):
+            self.input_dtype = None
+
+        def generate(self, x, **kwargs):
+            self.input_dtype = x.dtype
+            return torch.tensor([[1, 2, 3]])
+
+    class FakeTokenizer:
+        def decode(self, tokens, skip_special_tokens):
+            return "bf16"
+
+    class FakeMangaOcr:
+        def __init__(self):
+            self.model = FakeModel()
+            self.tokenizer = FakeTokenizer()
+
+        def __call__(self, img):
+            raise AssertionError("bf16 OCR should bypass MangaOcr.__call__")
+
+        def _preprocess(self, img):
+            return torch.zeros(3, 2, 2)
+
+    mpocr = MangaPageOcr.__new__(MangaPageOcr)
+    mpocr.ocr_num_beams = None
+    mpocr.ocr_bf16 = True
+    mpocr.dev_repeat_ocr_batch_size = 1
+    mpocr.mocr = FakeMangaOcr()
+
+    text = mpocr._recognize_crop(Image.new("RGB", (2, 2)))
+
+    assert text
+    assert mpocr.mocr.model.input_dtype == torch.bfloat16
 
 
 def _setup_and_run(

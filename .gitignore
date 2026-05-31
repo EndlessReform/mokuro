@@ -136,3 +136,4 @@ tests/data/input/integration/
 # Instrument files
 *.pyinstrument.html
 *.jsonl
+*summary.json
