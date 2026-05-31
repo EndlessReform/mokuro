@@ -12,6 +12,15 @@ from mokuro.legacy.overlay_generator import generate_legacy_html
 from mokuro.volume import VolumeCollection
 
 
+def _coerce_optional_int(value, name):
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{name} must be an integer") from e
+
+
 def run(
     *paths: Optional[Sequence[Union[str, Path]]],
     parent_dir: Optional[Union[str, Path]] = None,
@@ -30,6 +39,8 @@ def run(
     ocr_num_beams: Optional[int] = None,
     dev_repeat_ocr_batch_size: int = 1,
     detector_batch_size: int = 4,
+    ocr_batch_size: int = 1,
+    ocr_reorder_buffer_size: Optional[int] = None,
 ):
     """
     Process manga volumes with mokuro.
@@ -52,11 +63,24 @@ def run(
         ocr_num_beams: Override the OCR model beam count passed to transformers generate(). If None, use the model generation config.
         dev_repeat_ocr_batch_size: DEV ONLY. Artificially batch each OCR crop by repeating it N times, return only the first decoded output, and discard the rest. This is a smoke-test knob for generation batching overhead, not a real batching implementation.
         detector_batch_size: Number of uncached pages to run through the text detector in one batch.
+        ocr_batch_size: Number of OCR crops to run through decoder generation in one batch.
+        ocr_reorder_buffer_size: Number of OCR crop requests to stage before OCR batching. Reserved for future crop reordering; current behavior preserves request order.
     """
 
     if version:
         print(f"{__version__}")
         return
+
+    page_limit = _coerce_optional_int(page_limit, "page_limit")
+    ocr_num_beams = _coerce_optional_int(ocr_num_beams, "ocr_num_beams")
+    dev_repeat_ocr_batch_size = _coerce_optional_int(
+        dev_repeat_ocr_batch_size, "dev_repeat_ocr_batch_size"
+    )
+    detector_batch_size = _coerce_optional_int(detector_batch_size, "detector_batch_size")
+    ocr_batch_size = _coerce_optional_int(ocr_batch_size, "ocr_batch_size")
+    ocr_reorder_buffer_size = _coerce_optional_int(
+        ocr_reorder_buffer_size, "ocr_reorder_buffer_size"
+    )
 
     if page_limit is not None and page_limit < 0:
         raise ValueError("page_limit must be non-negative")
@@ -69,6 +93,18 @@ def run(
 
     if detector_batch_size < 1:
         raise ValueError("detector_batch_size must be at least 1")
+
+    if ocr_batch_size < 1:
+        raise ValueError("ocr_batch_size must be at least 1")
+
+    if ocr_reorder_buffer_size is not None and ocr_reorder_buffer_size < 1:
+        raise ValueError("ocr_reorder_buffer_size must be at least 1")
+
+    if ocr_reorder_buffer_size is not None and ocr_reorder_buffer_size < ocr_batch_size:
+        raise ValueError("ocr_reorder_buffer_size must be at least ocr_batch_size")
+
+    if dev_repeat_ocr_batch_size > 1 and ocr_batch_size > 1:
+        raise ValueError("dev_repeat_ocr_batch_size cannot be combined with ocr_batch_size > 1")
 
     if disable_ocr:
         logger.info("Running with OCR disabled")
@@ -155,6 +191,8 @@ def run(
         ocr_num_beams=ocr_num_beams,
         dev_repeat_ocr_batch_size=dev_repeat_ocr_batch_size,
         detector_batch_size=detector_batch_size,
+        ocr_batch_size=ocr_batch_size,
+        ocr_reorder_buffer_size=ocr_reorder_buffer_size,
     )
 
     try:

@@ -1,7 +1,9 @@
 import numpy as np
+import torch
+from PIL import Image
 
 from mokuro.mokuro_generator import MokuroGenerator
-from mokuro.manga_page_ocr import MangaPageOcr, OcrCropResult, PageLayout
+from mokuro.manga_page_ocr import MangaPageOcr, OcrCropRequest, OcrCropResult, PageLayout
 
 
 class FakeBlock:
@@ -107,6 +109,113 @@ def test_collect_ocr_requests_captures_block_box_before_crop_extraction_mutates_
     assert page_result["blocks"][0]["box"] == [0, 0, 5, 5]
     assert layout.blk_list[0].xyxy == [0, 0, 99, 5]
     assert len(requests) == 1
+
+
+def test_ocr_crop_requests_are_decoder_batched_without_reordering():
+    class FakeModel:
+        device = torch.device("cpu")
+
+        def __init__(self):
+            self.input_shapes = []
+
+        def generate(self, x, **kwargs):
+            self.input_shapes.append(tuple(x.shape))
+            start = sum(shape[0] for shape in self.input_shapes[:-1])
+            return torch.tensor([[start + i] for i in range(x.shape[0])])
+
+    class FakeTokenizer:
+        def decode(self, tokens, skip_special_tokens):
+            return f"text-{tokens.tolist()[0]}"
+
+        def encode(self, text):
+            return [101, *range(len(text)), 102]
+
+    class FakeMangaOcr:
+        def __init__(self):
+            self.model = FakeModel()
+            self.tokenizer = FakeTokenizer()
+
+        def _preprocess(self, img):
+            return torch.zeros(3, 2, 2)
+
+    mpocr = MangaPageOcr.__new__(MangaPageOcr)
+    mpocr.mocr = FakeMangaOcr()
+    mpocr.ocr_num_beams = None
+    mpocr.dev_repeat_ocr_batch_size = 1
+    mpocr.ocr_batch_size = 2
+    mpocr.ocr_reorder_buffer_size = 3
+
+    requests = [
+        OcrCropRequest(
+            page_idx=0,
+            blk_idx=idx,
+            line_idx=0,
+            chunk_idx=0,
+            img=Image.new("RGB", (2, 2)),
+            crop_h=2,
+            crop_w=2,
+        )
+        for idx in range(5)
+    ]
+
+    results = mpocr._recognize_crop_requests(requests)
+
+    assert [result.blk_idx for result in results] == [0, 1, 2, 3, 4]
+    assert [result.text for result in results] == ["ｔｅｘｔ－０", "ｔｅｘｔ－１", "ｔｅｘｔ－２", "ｔｅｘｔ－３", "ｔｅｘｔ－４"]
+    assert [result.ocr_batch_size for result in results] == [2, 2, 1, 2, 2]
+    assert mpocr.mocr.model.input_shapes == [(2, 3, 2, 2), (1, 3, 2, 2), (2, 3, 2, 2)]
+
+
+def test_ocr_reorder_buffer_size_must_cover_ocr_batch_size():
+    mpocr = MangaPageOcr.__new__(MangaPageOcr)
+    mpocr.ocr_batch_size = 4
+    mpocr.ocr_reorder_buffer_size = 3
+
+    try:
+        list(mpocr._iter_ocr_request_batches([object()] * 4))
+    except ValueError as e:
+        assert str(e) == "ocr_reorder_buffer_size must be at least ocr_batch_size"
+    else:
+        raise AssertionError("expected reorder buffer validation to fail")
+
+
+def test_zero_ocr_reorder_buffer_size_is_rejected(monkeypatch):
+    monkeypatch.setattr("mokuro.manga_page_ocr.TextDetector", lambda *args, **kwargs: None)
+    monkeypatch.setattr("mokuro.manga_page_ocr.MangaOcr", lambda *args, **kwargs: None)
+
+    try:
+        MangaPageOcr(ocr_reorder_buffer_size=0)
+    except ValueError as e:
+        assert str(e) == "ocr_reorder_buffer_size must be at least 1"
+    else:
+        raise AssertionError("expected reorder buffer validation to fail")
+
+
+def test_ocr_backend_result_count_must_match_request_count():
+    mpocr = MangaPageOcr.__new__(MangaPageOcr)
+    mpocr.ocr_batch_size = 2
+    mpocr.ocr_reorder_buffer_size = 2
+    mpocr._recognize_crop_batch = lambda imgs: ["only one"]
+
+    requests = [
+        OcrCropRequest(
+            page_idx=0,
+            blk_idx=idx,
+            line_idx=0,
+            chunk_idx=0,
+            img=Image.new("RGB", (2, 2)),
+            crop_h=2,
+            crop_w=2,
+        )
+        for idx in range(2)
+    ]
+
+    try:
+        mpocr._recognize_crop_requests(requests)
+    except ValueError as e:
+        assert str(e) == "OCR backend returned a different number of results than requests"
+    else:
+        raise AssertionError("expected OCR result count validation to fail")
 
 
 def test_process_volume_batches_uncached_pages_before_detector_work(tmp_path, monkeypatch):

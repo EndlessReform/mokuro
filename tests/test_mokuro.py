@@ -85,6 +85,28 @@ def test_page_limit(tmp_path, input_data_root):
     assert [page["img_path"] for page in mokuro["pages"]] == ["000a.jpg", "000b.jpg"]
 
 
+def test_cli_int_options_accept_string_values(tmp_path, input_data_root):
+    input_dir = tmp_path / "test0"
+    shutil.copytree(input_data_root / "test0", input_dir)
+
+    run(
+        parent_dir=input_dir,
+        force_cpu=True,
+        disable_confirmation=True,
+        disable_ocr=True,
+        legacy_html=False,
+        page_limit="2",
+        ocr_num_beams="1",
+        dev_repeat_ocr_batch_size="1",
+        detector_batch_size="2",
+        ocr_batch_size="2",
+        ocr_reorder_buffer_size="4",
+    )
+
+    json_paths = sorted((input_dir / "_ocr/vol1").iterdir())
+    assert [path.name for path in json_paths] == ["000a.json", "000b.json"]
+
+
 def test_dev_repeat_ocr_batch_size_uses_first_output():
     class FakeModel:
         device = torch.device("cpu")

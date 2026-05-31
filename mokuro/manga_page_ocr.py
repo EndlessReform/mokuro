@@ -49,6 +49,7 @@ class OcrCropResult:
     crop_w: int | None = None
     elapsed_ms: float | None = None
     tokens: int | None = None
+    ocr_batch_size: int = 1
 
 
 class InvalidImage(Exception):
@@ -70,6 +71,8 @@ class MangaPageOcr:
         ocr_num_beams=None,
         dev_repeat_ocr_batch_size=1,
         detector_batch_size=4,
+        ocr_batch_size=1,
+        ocr_reorder_buffer_size=None,
     ):
         self.text_height = text_height
         self.max_ratio_vert = max_ratio_vert
@@ -79,6 +82,10 @@ class MangaPageOcr:
         self.ocr_num_beams = ocr_num_beams
         self.dev_repeat_ocr_batch_size = dev_repeat_ocr_batch_size
         self.detector_batch_size = detector_batch_size
+        self.ocr_batch_size = ocr_batch_size
+        self.ocr_reorder_buffer_size = (
+            ocr_batch_size if ocr_reorder_buffer_size is None else ocr_reorder_buffer_size
+        )
 
         if self.ocr_num_beams is not None and self.ocr_num_beams < 1:
             raise ValueError("ocr_num_beams must be at least 1")
@@ -88,6 +95,18 @@ class MangaPageOcr:
 
         if self.detector_batch_size < 1:
             raise ValueError("detector_batch_size must be at least 1")
+
+        if self.ocr_batch_size < 1:
+            raise ValueError("ocr_batch_size must be at least 1")
+
+        if self.ocr_reorder_buffer_size < 1:
+            raise ValueError("ocr_reorder_buffer_size must be at least 1")
+
+        if self.ocr_reorder_buffer_size < self.ocr_batch_size:
+            raise ValueError("ocr_reorder_buffer_size must be at least ocr_batch_size")
+
+        if self.dev_repeat_ocr_batch_size > 1 and self.ocr_batch_size > 1:
+            raise ValueError("dev_repeat_ocr_batch_size cannot be combined with ocr_batch_size > 1")
 
         if not self.disable_ocr:
             if self.dev_repeat_ocr_batch_size > 1:
@@ -223,25 +242,40 @@ class MangaPageOcr:
 
     def _recognize_crop_requests(self, requests):
         results = []
-        for request in requests:
+        for batch in self._iter_ocr_request_batches(requests):
             t0 = time.perf_counter()
-            chunk_text = self._recognize_crop(request.img)
+            chunk_texts = self._recognize_crop_batch([request.img for request in batch])
             elapsed_ms = (time.perf_counter() - t0) * 1000
-            num_tokens = len(self.mocr.tokenizer.encode(chunk_text)) - 2  # subtract CLS/SEP
-            results.append(
-                OcrCropResult(
-                    page_idx=request.page_idx,
-                    blk_idx=request.blk_idx,
-                    line_idx=request.line_idx,
-                    chunk_idx=request.chunk_idx,
-                    text=chunk_text,
-                    crop_h=request.crop_h,
-                    crop_w=request.crop_w,
-                    elapsed_ms=elapsed_ms,
-                    tokens=num_tokens,
+            batch_size = len(batch)
+            if len(chunk_texts) != batch_size:
+                raise ValueError("OCR backend returned a different number of results than requests")
+            for request, chunk_text in zip(batch, chunk_texts):
+                num_tokens = len(self.mocr.tokenizer.encode(chunk_text)) - 2  # subtract CLS/SEP
+                results.append(
+                    OcrCropResult(
+                        page_idx=request.page_idx,
+                        blk_idx=request.blk_idx,
+                        line_idx=request.line_idx,
+                        chunk_idx=request.chunk_idx,
+                        text=chunk_text,
+                        crop_h=request.crop_h,
+                        crop_w=request.crop_w,
+                        elapsed_ms=elapsed_ms,
+                        tokens=num_tokens,
+                        ocr_batch_size=batch_size,
+                    )
                 )
-            )
         return results
+
+    def _iter_ocr_request_batches(self, requests):
+        if self.ocr_reorder_buffer_size < self.ocr_batch_size:
+            raise ValueError("ocr_reorder_buffer_size must be at least ocr_batch_size")
+
+        for window_start in range(0, len(requests), self.ocr_reorder_buffer_size):
+            window = requests[window_start:window_start + self.ocr_reorder_buffer_size]
+            # Future crop reordering belongs inside this window. For now, preserve detector/page order.
+            for batch_start in range(0, len(window), self.ocr_batch_size):
+                yield window[batch_start:batch_start + self.ocr_batch_size]
 
     @staticmethod
     def _empty_page_result(layout):
@@ -292,9 +326,27 @@ class MangaPageOcr:
                 "aspect": round(result.crop_w / result.crop_h, 2) if result.crop_h else 0,
                 "tokens": result.tokens,
                 "ocr_ms": round(result.elapsed_ms, 1),
-                "ocr_batch_size": self.dev_repeat_ocr_batch_size,
+                "ocr_batch_size": result.ocr_batch_size,
             }) + "\n"
         )
+
+    def _recognize_crop_batch(self, imgs):
+        if len(imgs) == 1 and self.ocr_batch_size == 1:
+            return [self._recognize_crop(imgs[0])]
+
+        if self.dev_repeat_ocr_batch_size != 1:
+            raise ValueError("dev_repeat_ocr_batch_size cannot be combined with batched OCR")
+
+        imgs = [img.convert("L").convert("RGB") for img in imgs]
+        x = torch.stack([self.mocr._preprocess(img) for img in imgs]).to(self.mocr.model.device)
+        generate_kwargs = {"max_length": 300}
+        if self.ocr_num_beams is not None:
+            generate_kwargs["num_beams"] = self.ocr_num_beams
+        xs = self.mocr.model.generate(x, **generate_kwargs).cpu()
+        return [
+            post_process(self.mocr.tokenizer.decode(tokens, skip_special_tokens=True))
+            for tokens in xs
+        ]
 
     def _recognize_crop(self, img):
         if self.dev_repeat_ocr_batch_size == 1 and self.ocr_num_beams is None:
