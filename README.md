@@ -43,13 +43,13 @@ try installing Python from the [official site](https://www.python.org/downloads)
 If you want to run with GPU, install PyTorch as described [here](https://pytorch.org/get-started/locally/#start-locally),
 otherwise this step can be skipped.
 
-Install the command line app with [uv](https://docs.astral.sh/uv/):
+Install the command line app from source with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv tool install mokuro-fast
+uv tool install mokuro-fast --from git+https://github.com/EndlessReform/mokuro.git
 ```
 
-To upgrade an existing uv tool install:
+To upgrade an existing install:
 
 ```bash
 uv tool upgrade mokuro-fast
