@@ -46,13 +46,13 @@ otherwise this step can be skipped.
 Install the command line app with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv tool install mokuro
+uv tool install mokuro-fast
 ```
 
 To upgrade an existing uv tool install:
 
 ```bash
-uv tool upgrade mokuro
+uv tool upgrade mokuro-fast
 ```
 
 # Development
@@ -70,7 +70,7 @@ uv sync --dev
 Run project commands through uv:
 
 ```bash
-uv run mokuro /path/to/manga/vol1
+uv run mokuro-fast /path/to/manga/vol1
 uv run pytest
 uv run ruff check .
 uv run ruff format .
@@ -84,7 +84,7 @@ uv build
 ## Run on one volume
 
 ```bash
-mokuro /path/to/manga/vol1
+mokuro-fast /path/to/manga/vol1
 ```
 
 This will generate `/path/to/manga/vol1.html` file, which you can open in a browser.
@@ -92,13 +92,13 @@ This will generate `/path/to/manga/vol1.html` file, which you can open in a brow
 If your path contains spaces, enclose it in double quotes, like this:
 
 ```bash
-mokuro "/path/to/manga/volume 1"
+mokuro-fast "/path/to/manga/volume 1"
 ```
 
 ## Run on multiple volumes
 
 ```bash
-mokuro /path/to/manga/vol1 /path/to/manga/vol2 /path/to/manga/vol3
+mokuro-fast /path/to/manga/vol1 /path/to/manga/vol2 /path/to/manga/vol3
 ```
 
 For each volume, a separate HTML file will be generated.
@@ -117,7 +117,7 @@ manga_title/
 You can process all volumes by running:
 
 ```bash
-mokuro --parent_dir manga_title/
+mokuro-fast --parent_dir manga_title/
 ```
 
 ## Other options
@@ -159,7 +159,7 @@ These options are mainly useful for profiling, model experiments, and tuning bat
 Fire also accepts hyphenated option names, for example:
 
 ```bash
-mokuro ./vol1 --ocr-bf16 --ocr-batch-size=8 --ocr-reorder-buffer-size=32 --ocr-summary-file=ocr-summary.json
+mokuro-fast ./vol1 --ocr-bf16 --ocr-batch-size=8 --ocr-reorder-buffer-size=32 --ocr-summary-file=ocr-summary.json
 ```
 
 ## Legacy HTML vs. new .mokuro format

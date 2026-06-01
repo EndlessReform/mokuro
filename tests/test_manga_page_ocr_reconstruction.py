@@ -3,8 +3,8 @@ import pytest
 import torch
 from PIL import Image
 
-from mokuro.mokuro_generator import MokuroGenerator
-from mokuro.manga_page_ocr import MangaPageOcr, OcrCropRequest, OcrCropResult, PageLayout
+from mokuro_fast.mokuro_generator import MokuroGenerator
+from mokuro_fast.manga_page_ocr import MangaPageOcr, OcrCropRequest, OcrCropResult, PageLayout
 
 
 class FakeBlock:
@@ -106,9 +106,9 @@ def test_manga_page_ocr_passes_mlx_detector_options(monkeypatch, tmp_path):
     artifact_dir = tmp_path / "mlx-comictextdetector"
     artifact_dir.mkdir()
 
-    monkeypatch.setattr("mokuro.manga_page_ocr.TextDetector", FakeTextDetector)
-    monkeypatch.setattr("mokuro.manga_page_ocr.MangaOcr", FakeMangaOcr)
-    monkeypatch.setattr("mokuro.manga_page_ocr.MangaPageOcr._configure_ocr_dtype", lambda self: None)
+    monkeypatch.setattr("mokuro_fast.manga_page_ocr.TextDetector", FakeTextDetector)
+    monkeypatch.setattr("mokuro_fast.manga_page_ocr.MangaOcr", FakeMangaOcr)
+    monkeypatch.setattr("mokuro_fast.manga_page_ocr.MangaPageOcr._configure_ocr_dtype", lambda self: None)
 
     mpocr = MangaPageOcr(
         force_cpu=True,
@@ -316,8 +316,8 @@ def test_ocr_reorder_buffer_size_must_cover_ocr_batch_size():
 
 
 def test_zero_ocr_reorder_buffer_size_is_rejected(monkeypatch):
-    monkeypatch.setattr("mokuro.manga_page_ocr.TextDetector", lambda *args, **kwargs: None)
-    monkeypatch.setattr("mokuro.manga_page_ocr.MangaOcr", lambda *args, **kwargs: None)
+    monkeypatch.setattr("mokuro_fast.manga_page_ocr.TextDetector", lambda *args, **kwargs: None)
+    monkeypatch.setattr("mokuro_fast.manga_page_ocr.MangaOcr", lambda *args, **kwargs: None)
 
     try:
         MangaPageOcr(ocr_reorder_buffer_size=0)
@@ -342,8 +342,8 @@ def test_ocr_bf16_casts_ocr_model_on_accelerated_device(monkeypatch):
         def __init__(self, *args, **kwargs):
             self.model = FakeModel()
 
-    monkeypatch.setattr("mokuro.manga_page_ocr.TextDetector", lambda *args, **kwargs: None)
-    monkeypatch.setattr("mokuro.manga_page_ocr.MangaOcr", FakeMangaOcr)
+    monkeypatch.setattr("mokuro_fast.manga_page_ocr.TextDetector", lambda *args, **kwargs: None)
+    monkeypatch.setattr("mokuro_fast.manga_page_ocr.MangaOcr", FakeMangaOcr)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch.backends.mps, "is_available", lambda: True)
 

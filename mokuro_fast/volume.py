@@ -4,7 +4,7 @@ from enum import Enum, auto
 from loguru import logger
 from natsort import natsorted
 
-from mokuro.utils import get_path_format, load_json, dump_json, unzip
+from mokuro_fast.utils import get_path_format, load_json, dump_json, unzip
 
 
 class VolumeStatus(Enum):

@@ -1,5 +1,5 @@
 [project]
-name = "mokuro"
+name = "mokuro-fast"
 authors = [
     {name = "Maciej Budyś", email = "kha-white@mail.com"},
     {name = "Jacob Keisling", email = "contact@keisling.me"},
@@ -44,10 +44,10 @@ requires = ["setuptools >= 61.0.0", "setuptools_scm"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["mokuro*"]
+include = ["mokuro_fast*"]
 
 [tool.setuptools.dynamic]
-version = {attr = "mokuro._version.__version__"}
+version = {attr = "mokuro_fast._version.__version__"}
 
 [tool.ruff]
 line-length = 120
@@ -68,4 +68,4 @@ members = ["comic_text_detector"]
 comic-text-detector = { workspace = true }
 
 [project.scripts]
-mokuro = "mokuro.__main__:main"
+mokuro-fast = "mokuro_fast.__main__:main"

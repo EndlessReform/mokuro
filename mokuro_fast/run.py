@@ -7,10 +7,10 @@ from typing import Sequence, Optional, Union
 import fire
 from loguru import logger
 
-from mokuro import MokuroGenerator
-from mokuro import __version__
-from mokuro.legacy.overlay_generator import generate_legacy_html
-from mokuro.volume import VolumeCollection
+from mokuro_fast import MokuroGenerator
+from mokuro_fast import __version__
+from mokuro_fast.legacy.overlay_generator import generate_legacy_html
+from mokuro_fast.volume import VolumeCollection
 
 
 def _coerce_optional_int(value, name):

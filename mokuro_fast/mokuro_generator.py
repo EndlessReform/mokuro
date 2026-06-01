@@ -3,10 +3,10 @@ from json import JSONDecodeError
 from loguru import logger
 from tqdm import tqdm
 
-from mokuro import __version__
-from mokuro.manga_page_ocr import MangaPageOcr, summarize_ocr_batch_stats
-from mokuro.utils import dump_json, load_json
-from mokuro.volume import Volume
+from mokuro_fast import __version__
+from mokuro_fast.manga_page_ocr import MangaPageOcr, summarize_ocr_batch_stats
+from mokuro_fast.utils import dump_json, load_json
+from mokuro_fast.volume import Volume
 
 
 class MokuroGenerator:

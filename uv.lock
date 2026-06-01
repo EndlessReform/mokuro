@@ -24,7 +24,7 @@ resolution-markers = [
 [manifest]
 members = [
     "comic-text-detector",
-    "mokuro",
+    "mokuro-fast",
 ]
 
 [[package]]
@@ -745,7 +745,7 @@ wheels = [
 ]
 
 [[package]]
-name = "mokuro"
+name = "mokuro-fast"
 source = { editable = "." }
 dependencies = [
     { name = "comic-text-detector" },

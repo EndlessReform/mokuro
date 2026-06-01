@@ -11,9 +11,9 @@ from scipy.signal.windows import gaussian
 from comic_text_detector.inference import TextDetector
 from manga_ocr import MangaOcr
 from manga_ocr.ocr import post_process
-from mokuro import __version__
-from mokuro.cache import cache
-from mokuro.utils import imread
+from mokuro_fast import __version__
+from mokuro_fast.cache import cache
+from mokuro_fast.utils import imread
 import torch
 
 

@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import mokuro.cache as cache_module
+import mokuro_fast.cache as cache_module
 
 
 def _new_instance(tmp_path):
@@ -46,7 +46,7 @@ class TestDownloadIfNeeded:
         file_path = instance.root / "test.pt"
         file_path.touch()
 
-        with patch("mokuro.cache.requests.get") as mock_get:
+        with patch("mokuro_fast.cache.requests.get") as mock_get:
             instance._download_if_needed(file_path, "http://example.com/test.pt")
 
         mock_get.assert_not_called()
@@ -59,7 +59,7 @@ class TestDownloadIfNeeded:
         mock_response.status_code = 200
         mock_response.iter_content.return_value = [b"chunk1", b"chunk2"]
 
-        with patch("mokuro.cache.requests.get", return_value=mock_response) as mock_get:
+        with patch("mokuro_fast.cache.requests.get", return_value=mock_response) as mock_get:
             instance._download_if_needed(file_path, "http://example.com/test.pt")
 
         mock_get.assert_called_once_with("http://example.com/test.pt", stream=True, verify=True)
@@ -72,7 +72,7 @@ class TestDownloadIfNeeded:
         mock_response = MagicMock()
         mock_response.status_code = 404
 
-        with patch("mokuro.cache.requests.get", return_value=mock_response):
+        with patch("mokuro_fast.cache.requests.get", return_value=mock_response):
             with pytest.raises(RuntimeError, match="Failed downloading"):
                 instance._download_if_needed(file_path, "http://example.com/test.pt")
 

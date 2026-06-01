@@ -6,8 +6,8 @@ import torch
 from loguru import logger
 from PIL import Image
 
-from mokuro.manga_page_ocr import MangaPageOcr
-from mokuro.run import run
+from mokuro_fast.manga_page_ocr import MangaPageOcr
+from mokuro_fast.run import run
 
 
 @pytest.mark.parametrize(
