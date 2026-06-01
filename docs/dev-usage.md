@@ -164,3 +164,21 @@ uv run --extra mlx mokuro ./my-volume \
 ```
 
 `--detector-compute-device cpu` uses the strict parity path. Omitting it lets MLX use its default device, which is usually faster on Apple Silicon but can have small final-coordinate drift from the GPU convolution kernels.
+
+Use `--bf16` with the MLX detector to run both the detector and OCR in bfloat16 where the selected devices support it:
+
+```bash
+uv run --extra mlx mokuro ./my-volume \
+  --detector-backend mlx \
+  --detector-model-path output/detector/mlx-comictextdetector \
+  --bf16
+```
+
+Use `--compile` to wrap the MLX detector's conv-heavy blocks in `mx.compile(..., shapeless=True)`, allowing those compiled functions to accept variable input shapes without recompiling for every height/width change. Shape-heavy pieces such as SPPF pooling and YOLO decode stay eager:
+
+```bash
+uv run --extra mlx mokuro ./my-volume \
+  --detector-backend mlx \
+  --detector-model-path output/detector/mlx-comictextdetector \
+  --compile
+```

@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 from PIL import Image
 
@@ -91,6 +92,10 @@ def test_manga_page_ocr_passes_mlx_detector_options(monkeypatch, tmp_path):
     seen = {}
 
     class FakeTextDetector:
+        @staticmethod
+        def _resolve_backend(_model_path, backend):
+            return backend
+
         def __init__(self, **kwargs):
             seen.update(kwargs)
 
@@ -103,9 +108,12 @@ def test_manga_page_ocr_passes_mlx_detector_options(monkeypatch, tmp_path):
 
     monkeypatch.setattr("mokuro.manga_page_ocr.TextDetector", FakeTextDetector)
     monkeypatch.setattr("mokuro.manga_page_ocr.MangaOcr", FakeMangaOcr)
+    monkeypatch.setattr("mokuro.manga_page_ocr.MangaPageOcr._configure_ocr_dtype", lambda self: None)
 
-    MangaPageOcr(
+    mpocr = MangaPageOcr(
         force_cpu=True,
+        bf16=True,
+        detector_compile=True,
         detector_backend="mlx",
         detector_model_path=artifact_dir,
         detector_input_size=512,
@@ -115,6 +123,19 @@ def test_manga_page_ocr_passes_mlx_detector_options(monkeypatch, tmp_path):
     assert seen["input_size"] == 512
     assert seen["backend"] == "mlx"
     assert seen["compute_device"] == "cpu"
+    assert seen["compute_dtype"] == "bf16"
+    assert seen["compile_model"] is True
+    assert mpocr.ocr_bf16 is True
+
+
+def test_bf16_requires_mlx_detector_backend():
+    with pytest.raises(ValueError, match="--bf16 requires an MLX detector backend"):
+        MangaPageOcr(force_cpu=True, bf16=True, detector_backend="torch")
+
+
+def test_compile_requires_mlx_detector_backend():
+    with pytest.raises(ValueError, match="--compile requires an MLX detector backend"):
+        MangaPageOcr(force_cpu=True, detector_compile=True, detector_backend="torch")
 
 
 def test_collect_ocr_requests_captures_block_box_before_crop_extraction_mutates_block():

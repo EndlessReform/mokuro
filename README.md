@@ -142,6 +142,8 @@ These options are mainly useful for profiling, model experiments, and tuning bat
 
 ```
 --ocr_num_beams: Override the OCR model beam count passed to transformers generate(). If None, use the model generation config.
+--bf16: Enable bfloat16 for both OCR and the MLX detector. Requires an MLX detector backend.
+--compile: Compile MLX detector conv blocks with variable-shape support. Requires an MLX detector backend.
 --ocr_bf16: Cast the OCR model and image inputs to bfloat16 on CUDA/MPS. Ignored on CPU.
 --detector_batch_size: Number of uncached pages to run through the text detector in one batch.
 --detector_backend: Text detector compute backend: auto, torch, opencv, or mlx.

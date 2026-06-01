@@ -39,6 +39,8 @@ def run(
     ocr_summary_file: Optional[Union[str, Path]] = None,
     page_limit: Optional[int] = None,
     ocr_num_beams: Optional[int] = None,
+    bf16: bool = False,
+    compile: bool = False,
     ocr_bf16: bool = False,
     dev_repeat_ocr_batch_size: int = 1,
     detector_batch_size: int = 4,
@@ -68,6 +70,8 @@ def run(
         ocr_summary_file: Path to a JSON file to write run-level OCR batch yield and token-raggedness summary statistics.
         page_limit: Process only the first N pages of each volume. If None, process all pages.
         ocr_num_beams: Override the OCR model beam count passed to transformers generate(). If None, use the model generation config.
+        bf16: Enable bfloat16 for both OCR and the MLX detector. Requires an MLX detector backend.
+        compile: Compile MLX detector conv blocks with variable-shape support. Requires an MLX detector backend.
         ocr_bf16: Cast the OCR model and image inputs to bfloat16 on CUDA/MPS. Ignored on CPU.
         dev_repeat_ocr_batch_size: DEV ONLY. Artificially batch each OCR crop by repeating it N times, return only the first decoded output, and discard the rest. This is a smoke-test knob for generation batching overhead, not a real batching implementation.
         detector_batch_size: Number of uncached pages to run through the text detector in one batch.
@@ -200,6 +204,8 @@ def run(
         disable_ocr=disable_ocr,
         timings_fh=timings_fh,
         ocr_num_beams=ocr_num_beams,
+        bf16=bf16,
+        detector_compile=compile,
         ocr_bf16=ocr_bf16,
         dev_repeat_ocr_batch_size=dev_repeat_ocr_batch_size,
         detector_batch_size=detector_batch_size,
