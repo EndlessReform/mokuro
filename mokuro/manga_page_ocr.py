@@ -168,6 +168,9 @@ class MangaPageOcr:
         ocr_bf16=False,
         dev_repeat_ocr_batch_size=1,
         detector_batch_size=4,
+        detector_backend="auto",
+        detector_model_path=None,
+        detector_compute_device=None,
         ocr_batch_size=1,
         ocr_reorder_buffer_size=None,
     ):
@@ -180,6 +183,9 @@ class MangaPageOcr:
         self.ocr_bf16 = ocr_bf16
         self.dev_repeat_ocr_batch_size = dev_repeat_ocr_batch_size
         self.detector_batch_size = detector_batch_size
+        self.detector_backend = detector_backend
+        self.detector_model_path = detector_model_path
+        self.detector_compute_device = detector_compute_device
         self.ocr_batch_size = ocr_batch_size
         self.ocr_reorder_buffer_size = (
             ocr_batch_size if ocr_reorder_buffer_size is None else ocr_reorder_buffer_size
@@ -219,9 +225,25 @@ class MangaPageOcr:
                 device = "mps"
             else:
                 device = "cpu"
-            logger.info(f"Initializing text detector, using device {device}")
+            detector_model_path = self.detector_model_path or cache.comic_text_detector
+            if self.detector_backend == "mlx" and self.detector_model_path is None:
+                raise ValueError(
+                    "detector_model_path is required for detector_backend='mlx' until an official MLX artifact is configured"
+                )
+            detector_compute_device = self.detector_compute_device
+            if detector_compute_device is None and force_cpu:
+                detector_compute_device = "cpu"
+            logger.info(
+                f"Initializing text detector, backend {self.detector_backend}, "
+                f"using device {device}"
+            )
             self.text_detector = TextDetector(
-                model_path=cache.comic_text_detector, input_size=detector_input_size, device=device, act="leaky"
+                model_path=detector_model_path,
+                input_size=detector_input_size,
+                device=device,
+                act="leaky",
+                backend=self.detector_backend,
+                compute_device=detector_compute_device,
             )
             self.mocr = MangaOcr(pretrained_model_name_or_path, force_cpu)
             self._configure_ocr_dtype()

@@ -87,6 +87,36 @@ def test_process_pages_preserves_page_order_after_batched_detection():
     ]
 
 
+def test_manga_page_ocr_passes_mlx_detector_options(monkeypatch, tmp_path):
+    seen = {}
+
+    class FakeTextDetector:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    class FakeMangaOcr:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    artifact_dir = tmp_path / "mlx-comictextdetector"
+    artifact_dir.mkdir()
+
+    monkeypatch.setattr("mokuro.manga_page_ocr.TextDetector", FakeTextDetector)
+    monkeypatch.setattr("mokuro.manga_page_ocr.MangaOcr", FakeMangaOcr)
+
+    MangaPageOcr(
+        force_cpu=True,
+        detector_backend="mlx",
+        detector_model_path=artifact_dir,
+        detector_input_size=512,
+    )
+
+    assert seen["model_path"] == artifact_dir
+    assert seen["input_size"] == 512
+    assert seen["backend"] == "mlx"
+    assert seen["compute_device"] == "cpu"
+
+
 def test_collect_ocr_requests_captures_block_box_before_crop_extraction_mutates_block():
     class MutatingBlock(FakeBlock):
         def get_transformed_region(self, img, line_idx, textheight):

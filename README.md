@@ -144,6 +144,9 @@ These options are mainly useful for profiling, model experiments, and tuning bat
 --ocr_num_beams: Override the OCR model beam count passed to transformers generate(). If None, use the model generation config.
 --ocr_bf16: Cast the OCR model and image inputs to bfloat16 on CUDA/MPS. Ignored on CPU.
 --detector_batch_size: Number of uncached pages to run through the text detector in one batch.
+--detector_backend: Text detector compute backend: auto, torch, opencv, or mlx.
+--detector_model_path: Optional detector model path. For MLX, pass the converted artifact directory or model.safetensors path.
+--detector_compute_device: Optional detector compute device. For MLX, use cpu or gpu; omitted uses the backend default.
 --ocr_batch_size: Number of OCR crops to run through decoder generation in one batch.
 --ocr_reorder_buffer_size: Number of OCR crop requests to stage before OCR batching. This is reserved for future crop reordering; current behavior preserves request order.
 --timings_file: Path to a JSONL file with one per-OCR-crop timing/statistics record. Each line includes page/block/line/chunk indices, crop dimensions, token count, OCR latency, and actual OCR batch size.

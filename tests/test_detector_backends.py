@@ -57,3 +57,17 @@ def test_mlx_backend_constructor_reports_missing_extra(monkeypatch):
 
     with pytest.raises(TextDetBackendUnavailable, match="requires the optional mlx extra"):
         mlx_backend.MlxTextDetComputeBackend("model.safetensors")
+
+
+def test_text_detector_auto_selects_mlx_for_artifact_dir(tmp_path):
+    from comic_text_detector.inference import TextDetector
+
+    artifact_dir = tmp_path / "mlx-comictextdetector"
+    artifact_dir.mkdir()
+    (artifact_dir / "config.json").write_text("{}", encoding="utf-8")
+
+    assert TextDetector._resolve_backend(artifact_dir, "auto") == "mlx"
+    assert TextDetector._resolve_backend(artifact_dir / "model.safetensors", "auto") == "mlx"
+
+    with pytest.raises(ValueError, match="MLX detector artifacts require"):
+        TextDetector._resolve_backend(artifact_dir, "torch")

@@ -42,6 +42,9 @@ def run(
     ocr_bf16: bool = False,
     dev_repeat_ocr_batch_size: int = 1,
     detector_batch_size: int = 4,
+    detector_backend: str = "auto",
+    detector_model_path: Optional[Union[str, Path]] = None,
+    detector_compute_device: Optional[str] = None,
     ocr_batch_size: int = 1,
     ocr_reorder_buffer_size: Optional[int] = None,
 ):
@@ -68,6 +71,9 @@ def run(
         ocr_bf16: Cast the OCR model and image inputs to bfloat16 on CUDA/MPS. Ignored on CPU.
         dev_repeat_ocr_batch_size: DEV ONLY. Artificially batch each OCR crop by repeating it N times, return only the first decoded output, and discard the rest. This is a smoke-test knob for generation batching overhead, not a real batching implementation.
         detector_batch_size: Number of uncached pages to run through the text detector in one batch.
+        detector_backend: Text detector compute backend: auto, torch, opencv, or mlx.
+        detector_model_path: Optional detector model path. For MLX, pass the converted artifact directory or model.safetensors path.
+        detector_compute_device: Optional detector backend compute device. For MLX, use cpu or gpu; None keeps the backend default.
         ocr_batch_size: Number of OCR crops to run through decoder generation in one batch.
         ocr_reorder_buffer_size: Number of OCR crop requests to stage before OCR batching. Reserved for future crop reordering; current behavior preserves request order.
     """
@@ -197,6 +203,9 @@ def run(
         ocr_bf16=ocr_bf16,
         dev_repeat_ocr_batch_size=dev_repeat_ocr_batch_size,
         detector_batch_size=detector_batch_size,
+        detector_backend=detector_backend,
+        detector_model_path=detector_model_path,
+        detector_compute_device=detector_compute_device,
         ocr_batch_size=ocr_batch_size,
         ocr_reorder_buffer_size=ocr_reorder_buffer_size,
     )

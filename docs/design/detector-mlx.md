@@ -4,594 +4,509 @@
 
 Add an optional MLX compute backend for `comic-text-detector`, then expose it through mokuro as `mokuro[mlx]`.
 
-The immediate target is the model forward pass used by bounding box detection. After detector batching, this path is large enough to matter in end-to-end runtime, and on Apple Silicon the current Torch/MPS path may still leave AMX/Metal performance on the table. The MLX backend should be a drop-in detector compute layer, not a rewrite of mokuro's page layout logic.
-
-The boundary should stay:
+The backend boundary stays deliberately narrow:
 
 ```text
-OpenCV/numpy preprocessing -> detector tensor -> compute backend -> ndarray outputs -> existing postprocess
+OpenCV/numpy preprocessing
+-> NCHW detector tensor
+-> compute backend
+-> ndarray outputs
+-> existing Python/OpenCV postprocess
 ```
 
-This keeps letterboxing, inverse scaling, NMS, DB contour extraction, `group_output(...)`, `refine_mask(...)`, and `TextBlock` construction in the current Python/OpenCV code until benchmarks prove a narrower postprocess migration is worth it.
+MLX should accelerate the detector model forward pass only. Letterboxing, inverse scaling, YOLO NMS, DB contour extraction, mask resizing, `group_output(...)`, `refine_mask(...)`, and `TextBlock` construction remain in the current detector code unless benchmarks later show that moving a postprocess step is worth the extra complexity.
 
-## Current Code Shape
-
-- Mokuro initializes `TextDetector` once in `MangaPageOcr.__init__` and already chooses CUDA, then MPS, then CPU when not forced to CPU (`mokuro/manga_page_ocr.py:216`).
-- Mokuro calls `process_pages(...)`, loads page layouts, calls `detect_pages(...)`, then OCRs all crop requests (`mokuro/manga_page_ocr.py:232`).
-- `detect_pages(...)` already delegates to `TextDetector.detect_batch(...)` when available (`mokuro/manga_page_ocr.py:267`).
-- `TextDetector.detect_batch(...)` stacks preprocessed tensors, calls `self.net(img_in)`, then loops per page for NMS, DB contour extraction, mask resize, grouping, and refinement (`comic_text_detector/inference.py:205`).
-- The compute object is `TextDetBase`: `blk_det` trunk, `text_seg` U-Net style mask head, and `text_det` DB head (`comic_text_detector/basemodel.py:222`).
-- `TextDetBase.forward(...)` currently returns `blks[0], mask, lines`, so the batched path depends on the forked submodule having removed that single-item assumption or having another local patch (`comic_text_detector/basemodel.py:240`).
-
-## 1. Pyproject Throatclearing And Local Dev
-
-The repo is in an intentionally vendored packaging state: mokuro's root package includes `comic_text_detector*` through setuptools discovery (`pyproject.toml:44`), and the detector source is tracked as a submodule. History suggests this was pragmatic rather than driven by a unique licensing requirement:
-
-- mokuro and comic-text-detector are both GPL-3.0, so vendoring is license-compatible as long as source and notices are conveyed;
-- the original setup depended on normal PyPI packages but had no installable `comic-text-detector` distribution to depend on;
-- `comic_text_detector/LICENSE` was explicitly added to the pip package shortly after setup packaging;
-- a uv workspace would be a good local-development shape today, but it is not itself a published PyPI dependency strategy.
-
-So the packaging choice is less "vendoring was wrong" and more "extras need a distribution boundary." If we want `mokuro[mlx]` to pull detector MLX dependencies transitively, then `comic-text-detector` needs to become an installable dependency with its own extras. If we only care about repo-local development, a workspace or editable path source is enough.
-
-Implemented packaged/workspace end state:
-
-1. Make `comic_text_detector/` its own installable distribution with `project.name = "comic-text-detector"` and import package `comic_text_detector`.
-2. Move detector runtime dependencies into `comic_text_detector/pyproject.toml`.
-3. Add a detector extra:
-
-```toml
-[project.optional-dependencies]
-mlx = [
-    "mlx>=0.31",
-    "safetensors>=0.5",
-    "huggingface-hub>=1.0",
-]
-```
-
-4. In mokuro, depend on the detector distribution instead of packaging the submodule:
-
-```toml
-[project]
-dependencies = [
-    "comic-text-detector",
-    # existing mokuro dependencies...
-]
-
-[project.optional-dependencies]
-mlx = [
-    "comic-text-detector[mlx]",
-]
-
-[tool.uv.workspace]
-members = ["comic_text_detector"]
-
-[tool.uv.sources]
-comic-text-detector = { workspace = true }
-
-[tool.setuptools.packages.find]
-include = ["mokuro*"]
-```
-
-The `tool.uv.workspace` and `tool.uv.sources` entries are for local development only. uv documents `project.optional-dependencies` as the published extras table, `tool.uv.workspace` as the set of local member projects, and `{ workspace = true }` as the source that tells uv to resolve `comic-text-detector` from the member package. uv installs workspace members in editable mode during `uv sync` and `uv run`. See:
-
-- https://docs.astral.sh/uv/concepts/projects/dependencies/
-- https://docs.astral.sh/uv/concepts/projects/config/#editable-mode
-- https://docs.astral.sh/uv/concepts/projects/workspaces/
-
-Local commands after the packaging split:
-
-```bash
-uv sync
-uv sync --extra mlx
-uv run python -c "import comic_text_detector, mokuro"
-uv run --extra mlx python -c "import mlx.core as mx; import comic_text_detector"
-```
-
-Release note: for PyPI users, workspace membership is not enough by itself. mokuro releases need either a separately published `comic-text-detector` distribution or a deliberate return to vendoring for sdists/wheels. The workspace setup is the right development topology, while the published packaging story is a separate release decision.
-
-Compatibility note: `mokuro[mlx]` should only promise "install MLX-capable detector bits." Runtime selection should still check platform and artifact availability and fall back cleanly to Torch when MLX is unavailable or unsupported.
-
-## 2. Test Fixture Script
-
-Before writing an MLX implementation, create a fixture generator inside `comic_text_detector` that records Torch truth as plain ndarrays. This is the DMZ between frameworks.
-
-Implemented script:
-
-```text
-comic_text_detector/scripts/dump_detector_fixture.py
-```
-
-Default command shape:
-
-```bash
-uv run python -m comic_text_detector.scripts.dump_detector_fixture \
-  --image tests/data/input/test0/vol1/000a.jpg \
-  --batch-image tests/data/input/test0/vol1/001a.jpg \
-  --input-size 1024 \
-  --out /tmp/ctd-fixture
-```
-
-The script defaults to the same detector checkpoint mokuro uses: `${XDG_CACHE_HOME:-~/.cache}/manga-ocr/comictextdetector.pt`. If it is missing, the script downloads mokuro's default detector artifact from `beta-0.2.1/comictextdetector.pt`. `--checkpoint` remains available as an override for testing a different detector file.
-
-Outputs:
-
-```text
-/tmp/ctd-fixture/
-  manifest.json
-  single.npz
-  batch.npz
-  single-final.json
-  batch-final.json
-```
-
-`manifest.json` records:
-
-- fixture schema, e.g. `comic_text_detector.mlx_fixture.v1`
-- git commit of the detector submodule
-- checkpoint path and SHA256
-- image paths and image SHA256 values
-- input size, activation name, dtype, device, and thresholds
-- package versions for `torch`, `numpy`, `opencv-python`, and optionally `mlx`
-- generated split summaries, including NMS counts, line counts, and final block counts
-
-Each `.npz` uses ndarray values only:
-
-```text
-input.nchw.fp32             # right before compute backend; shape (N, 3, H, W)
-input.nhwc.fp32             # same data transposed for MLX convenience
-preprocess.dw_dh            # int32, shape (N, 2)
-preprocess.resize_ratio     # float32, shape (N, 2)
-trunk.feature_1             # selected YOLO feature map
-trunk.feature_3
-trunk.feature_5
-trunk.feature_7
-trunk.feature_9
-head.yolo_decoded           # pre-NMS model output, shape (N, anchors, 6)
-head.mask                   # raw mask tensor, shape (N, 1, H, W)
-head.lines                  # DB output tensor, shape (N, 2, H, W)
-post.mask_uint8             # raw uint8 mask on the fixed detector input canvas
-```
-
-Ragged outputs use fixed arrays plus counts:
-
-```text
-post.nms.values             # float32, shape (total_boxes, 6)
-post.nms.counts             # int32, shape (N,)
-post.lines.values           # int32, shape (total_lines, 4, 2)
-post.lines.scores           # float32, shape (total_lines,)
-post.lines.counts           # int32, shape (N,)
-```
-
-`single-final.json` and `batch-final.json` serialize the existing public detector result:
-
-- resized page mask shape and checksum
-- refined mask shape and checksum
-- each `TextBlock.to_dict()` result
-
-The fixture dumps intermediates with explicit hooks:
-
-1. `preprocess_img(..., to_tensor=False)` to capture the right-before tensor as numpy, then manually produce NCHW normalized fp32.
-2. `blk_det(input, detect=True)` to capture decoded YOLO output and trunk features.
-3. `text_seg(*features, forward_mode=TEXTDET_INFERENCE)` to capture raw mask and seg features.
-4. `text_det(*seg_features, step_eval=False)` to capture DB line maps.
-5. Existing postprocess path to capture final masks and blocks.
-
-Acceptance tests:
-
-- Torch single and Torch batch fixtures agree for the first image at all shared boundaries within exact or near-exact tolerance.
-- Fixture generation is deterministic on CPU.
-- The MLX backend can load the fixture and compare every implemented layer group before plugging into mokuro.
-
-==NOTE==: Sample for test0 is at `output/detector` (not tracked)
-
-## 3. MLX Handoff
-
-Keep preprocessing in numpy/OpenCV for the first pass.
-
-Reasons:
-
-- `preprocess_img(...)` already handles BGR/RGB conversion, letterbox geometry, padding, and resize metadata (`comic_text_detector/inference.py:75`).
-- Postprocess needs per-page geometry and OpenCV-heavy work anyway (`comic_text_detector/inference.py:237`).
-- Moving preprocessing to MLX would add layout conversions before we know the model forward is faster.
-
-Implemented a small backend protocol inside `comic_text_detector/backends.py`:
+The public compute contract is:
 
 ```python
 class TextDetComputeBackend(Protocol):
     name: str
 
     def forward(self, input_nchw: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return yolo_decoded, mask, lines as ndarrays."""
+        """Return yolo_decoded, mask, and lines as numpy arrays."""
 ```
 
-Implemented Torch backend contract:
+Output shapes:
 
 ```text
-np.ndarray NCHW fp32/bf16-ish request
--> torch.from_numpy(...).to(device)
--> TextDetBase
--> detach().cpu().numpy()
+yolo_decoded: float32, shape (N, anchors, 5 + nc), currently (N, anchors, 7)
+mask:         float32, shape (N, 1, H, W)
+lines:        float32, shape (N, 2, H, W)
 ```
 
-`TorchTextDetComputeBackend.forward(...)` is now the existing detector compute path. It returns ndarray outputs at the backend boundary, and `TextDetector` feeds those arrays into the existing NMS, mask, DB line-map, grouping, and refinement postprocess.
+## Current State
 
-Stubbed MLX backend:
+Implemented:
+
+- `comic_text_detector` is a workspace package with an optional `mlx` extra.
+- `mokuro[mlx]` depends on `comic-text-detector[mlx]`.
+- `TextDetector` has a backend selection path for `auto | torch | opencv | mlx`.
+- Torch and MLX compute backends expose the same ndarray contract.
+- `TextDetBase.forward(...)` returns the full decoded YOLO batch instead of a single item.
+- The fixture dumper records Torch reference tensors and final detector JSON.
+- The conversion script writes an fp32 `safetensors` artifact and a config file.
+- The MLX backend ports:
+  - YOLOv5 trunk layers `0..9`;
+  - YOLO PAN neck and Detect decode layers `10..24`;
+  - segmentation mask head;
+  - DB line head.
+- Optional fixture parity tests cover trunk features, mask/DB heads, and decoded YOLO output.
+
+Not implemented yet:
+
+- Mokuro does not auto-select or directly pass an MLX detector artifact yet.
+- The MLX model code is still a porting workbench in one large file.
+- The MLX forward path is eager and not compiled with `mx.compile`.
+- The artifact config is too verbose and should be reshaped before publishing or wiring into `auto`.
+- No official MLX artifact download/cache path exists yet.
+
+## Files
+
+Core detector boundary:
 
 ```text
+comic_text_detector/backends.py
+comic_text_detector/inference.py
 comic_text_detector/mlx_backend.py
 ```
 
-The stub imports `mlx.core` lazily during `MlxTextDetComputeBackend(...)` construction, so importing `comic_text_detector`, `comic_text_detector.inference`, or `comic_text_detector.mlx_backend` does not require the optional `mlx` extra. Requesting `backend="mlx"` fails clearly when the extra is missing, and currently also fails clearly after import because model conversion and forward execution are not implemented yet.
-
-Future MLX backend implementation:
+Fixture and conversion tools:
 
 ```text
-np.ndarray NCHW fp32
--> mx.array(...)
--> transpose to NHWC once
--> MLX detector model
--> transpose outputs back to NCHW-compatible ndarray shapes
-```
-
-MLX uses channels-last input for `nn.Conv2d`; the official docs describe Conv2d input as `NHWC`. MLX `conv_transpose2d` also takes `(N, H, W, C_in)` and weights in `(C_out, KH, KW, C_in)`, so weight conversion must be deliberate rather than a blind state dict load.
-
-The public `TextDetector` wrapper can gain a `backend` argument:
-
-```python
-TextDetector(..., backend="auto")  # auto | torch | opencv | mlx
-```
-
-Implemented selection rules:
-
-- `backend="torch"`: current behavior.
-- `backend="opencv"`: current ONNX path.
-- `backend="mlx"`: require `comic-text-detector[mlx]`, require an MLX artifact, and fail clearly if unavailable.
-- `backend="auto"`: currently preserves existing behavior: ONNX models select OpenCV, all other models select Torch. The later artifact-aware Apple Silicon MLX auto-selection should be added only after a real MLX artifact and forward implementation exist.
-
-Implementation notes:
-
-- `TextDetBase.forward(...)` now returns the full decoded YOLO batch instead of `blks[0]`, matching the backend contract shape `(N, anchors, 6)`.
-- `TextDetector` still keeps `backend` as the public string state for compatibility, but routes Torch/MLX compute through `self.compute_backend.forward(input_nchw)`.
-- `postprocess_yolo(...)` and the batched path now accept ndarray backend outputs without wrapping them back into a Torch model object.
-- Added tests for the Torch ndarray contract and the lazy MLX import/failure behavior.
-
-Mokuro pass-through:
-
-```python
-TextDetector(
-    model_path=cache.comic_text_detector,
-    input_size=detector_input_size,
-    device=device,
-    act="leaky",
-    backend=detector_backend,
-)
-```
-
-Add a mokuro CLI knob later only if `auto` is not enough:
-
-```text
---detector-backend auto|torch|mlx|opencv
-```
-
-Output contract from MLX must match the current Torch return before postprocess:
-
-```text
-yolo_decoded: np.float32, shape (N, anchors, 6)
-mask:         np.float32 or np.bfloat16 converted to np.float32, shape (N, 1, H, W)
-lines:        np.float32 or np.bfloat16 converted to np.float32, shape (N, 2, H, W)
-```
-
-Do not move NMS to MLX in the first pass. `non_max_suppression(...)` is already batch-aware, and the result is ragged by nature (`comic_text_detector/inference.py:119`).
-
-## 4. Reproducible MLX Artifact Script
-
-Created the conversion script shell in the detector repo:
-
-```text
+comic_text_detector/scripts/dump_detector_fixture.py
 comic_text_detector/scripts/convert_to_mlx.py
+comic_text_detector/scripts/compare_mlx_trunk_fixture.py
+comic_text_detector/scripts/compare_mlx_heads_fixture.py
+comic_text_detector/scripts/compare_mlx_yolo_fixture.py
 ```
 
-Minimum viable inspection command:
-
-```bash
-uv run python -m comic_text_detector.scripts.convert_to_mlx keys \
-  --out /tmp/comictextdetector-keys.txt
-```
-
-The `keys` subcommand loads the same upstream detector checkpoint source used by mokuro and the fixture script: `${XDG_CACHE_HOME:-~/.cache}/manga-ocr/comictextdetector.pt`, downloading `comictextdetector.pt` from the `zyddnys/manga-image-translator` `beta-0.2.1` release if it is not already cached. The detector repo itself does not currently contain a Hugging Face detector model id; `--hf-repo-id`, `--hf-filename`, and `--hf-revision` are explicit options only, so we can point at a real mirror later without hard-coding the OCR model id by mistake.
-
-The key report is tab-separated text:
+Optional parity tests:
 
 ```text
-# key  dtype  shape  elements  bytes
-blk_det.weights.model.0.conv.weight  float16  (32, 3, 6, 6)  3456  6912
-...
-
-# total model size
-total_tensors   670
-total_elements  23453232
-total_bytes     79725266
-total_mib       76.032
+tests/test_detector_backends.py
+tests/test_mlx_trunk_parity.py
+tests/test_mlx_head_parity.py
+tests/test_mlx_yolo_parity.py
 ```
 
-Implemented local fp32 safetensors dump:
-
-```bash
-uv run --extra mlx python -m comic_text_detector.scripts.convert_to_mlx dump
-```
-
-Default local output path while modeling is under ignored `output/`:
+Local generated assets live under ignored `output/detector/`:
 
 ```text
-output/detector/mlx-comictextdetector/
+output/detector/
+  manifest.json
+  single.npz
+  batch.npz
+  single-final.json
+  batch-final.json
+  mlx-comictextdetector/
+    config.json
+    model.fp32.safetensors
+```
+
+## Fixture Contract
+
+The fixture is the framework-neutral truth boundary. It records the exact tensors that the MLX backend must reproduce before we trust it inside mokuro.
+
+Default generation:
+
+```bash
+uv run python -m comic_text_detector.scripts.dump_detector_fixture \
+  --image tests/data/input/test0/vol1/000a.jpg \
+  --batch-image tests/data/input/test0/vol1/001a.jpg \
+  --input-size 1024 \
+  --out output/detector
+```
+
+The script defaults to the same detector checkpoint mokuro uses:
+
+```text
+${XDG_CACHE_HOME:-~/.cache}/manga-ocr/comictextdetector.pt
+```
+
+If missing, it downloads the current mokuro detector checkpoint from the `zyddnys/manga-image-translator` `beta-0.2.1` release.
+
+Important `.npz` keys:
+
+```text
+input.nchw.fp32
+input.nhwc.fp32
+preprocess.dw_dh
+preprocess.resize_ratio
+trunk.feature_1
+trunk.feature_3
+trunk.feature_5
+trunk.feature_7
+trunk.feature_9
+head.yolo_decoded
+head.mask
+head.lines
+post.mask_uint8
+post.nms.values
+post.nms.counts
+post.lines.values
+post.lines.scores
+post.lines.counts
+```
+
+`single-final.json` and `batch-final.json` serialize final public detector results: mask checksums and `TextBlock.to_dict()` output.
+
+## Artifact Conversion
+
+Current command:
+
+```bash
+uv run --extra mlx python -m comic_text_detector.scripts.convert_to_mlx dump \
+  --out-dir output/detector/mlx-comictextdetector
+```
+
+Current output:
+
+```text
+mlx-comictextdetector/
   config.json
   model.fp32.safetensors
 ```
 
-This keeps the large experimental artifact near the existing detector fixture output without making it a release asset. Pass `--out-dir` only when testing another local location.
-
-The first dump is fp32 only. Floating tensors are converted to `torch.float32` before writing; integer buffers such as `num_batches_tracked` remain integer tensors. Based on `output/detector/comictextdetector-keys.txt`, layout transforms are:
+Current conversion rules:
 
 ```text
-Conv2d:          torch OIHW -> MLX OHWI
-ConvTranspose2d: torch IOHW -> MLX OHWI
+Conv2d:           torch OIHW -> MLX OHWI
+ConvTranspose2d:  torch IOHW -> MLX OHWI
+Floating tensors: torch dtype -> fp32
+Integer buffers:  preserved
 ```
 
-Current real checkpoint conversion summary:
+The current artifact works for parity, but `config.json` is not publishable shape. It is about 177 KB and includes:
+
+- local source checkpoint path;
+- source SHA and URL;
+- artifact totals;
+- layout transform counts;
+- all 670 tensor names and shapes;
+- raw YOLOv5 cfg.
+
+Runtime currently needs only:
 
 ```text
-tensor_count                    670
-total_elements                  23453232
-total_mib                       89.467
-conv2d_oihw_to_ohwi             103
-conv_transpose2d_iohw_to_ohwi   12
-none                            555
+artifact.file
+yolov5.cfg
 ```
 
-The transposed-conv keys are classified from the detector module definitions, not just rank:
+So the next round should split runtime config from conversion audit data.
 
-- `text_seg.upconv*.conv.1.weight`
-- `text_seg.upconv6.0.weight`
-- `text_det.upconv*.conv.1.weight`
-- `text_det.binarize.3.weight`
-- `text_det.binarize.6.weight`
-- `text_det.thresh.3.weight`
-- `text_det.thresh.6.weight`
+## MLX Implementation
 
-`config.json` records the source checkpoint path, SHA256, upstream URL, artifact filename, dtype, tensor counts, layout transforms, per-tensor source/output shape and dtype, and the YOLOv5 `blk_det.cfg` block needed to reconstruct the trunk:
+Current implementation is intentionally direct:
+
+```text
+public NCHW np.ndarray
+-> mx.array(...)
+-> transpose to NHWC
+-> MLX model math using converted OHWI weights
+-> transpose mask/lines back to NCHW
+-> np.ndarray outputs
+```
+
+Implemented model pieces:
+
+- `MlxYoloTrunk` runs YOLOv5 block detector layers, including PAN neck and Detect decode.
+- `MlxTextDetHeads` runs the segmentation and DB heads.
+- `MlxTextDetComputeBackend.forward(...)` returns `(yolo_decoded, mask, lines)`.
+
+The current code is correct enough for parity but not yet idiomatic MLX:
+
+- it is one large `mlx_backend.py` file;
+- model math and numpy boundary handling are mixed;
+- weights are accessed from a flat dictionary;
+- grid creation uses numpy;
+- the forward path is eager;
+- no `mx.compile` path exists yet;
+- head Conv+BN fusion is recomputed during forward rather than cached or converted.
+
+## Parity
+
+CPU-stream parity is the strict correctness gate because MLX GPU uses a fast Winograd path for some larger 3x3 stride-1 convolutions.
+
+Current passing tests:
+
+```bash
+uv run --extra mlx python -m pytest \
+  tests/test_detector_backends.py \
+  tests/test_mlx_trunk_parity.py \
+  tests/test_mlx_head_parity.py \
+  tests/test_mlx_yolo_parity.py \
+  -q
+```
+
+Measured CPU-stream parity:
+
+```text
+trunk.feature_{1,3,5,7,9}: allclose at 1e-3
+head.mask:                 max abs around 4e-6 with Torch trunk injection
+head.lines:                max abs around 5e-6 with Torch trunk injection
+head.yolo_decoded:          allclose at rtol=1e-3, atol=1e-3
+full backend triple:        allclose at rtol=1e-3, atol=1e-3 on fixture
+```
+
+Measured MLX GPU vs Torch MPS on the two-image batch fixture:
+
+```text
+mask max abs:       ~0.021
+mask mean abs:      ~4.8e-5
+mask P99 abs:       ~0.0014
+lines max abs:      ~0.016
+yolo max abs:       ~3.68 px
+yolo mean abs:      ~0.014 px
+binary mask drift:  ~0.006% pixels at threshold 0.3 or 0.5
+```
+
+The GPU drift is small at the final mask decision level, but strict tensor parity should continue to run on the CPU stream.
+
+## Round 1: Make The MLX Path Idiomatic
+
+Before wiring MLX into mokuro auto-selection, clean up the MLX backend and artifact shape.
+
+### Package Layout
+
+Replace the single-file backend with a small package:
+
+```text
+comic_text_detector/mlx_backend/
+  __init__.py
+  backend.py
+  configuration_textdet.py
+  modeling_textdet.py
+  ops.py
+```
+
+Responsibilities:
+
+- `backend.py`: public `MlxTextDetComputeBackend`, artifact resolution, numpy in/out boundary, stream/device selection.
+- `configuration_textdet.py`: config dataclass plus load/save helpers.
+- `modeling_textdet.py`: MLX model classes and pure MLX forward methods.
+- `ops.py`: pooling windows, upsample, activations, YOLO grid helpers, and small shared utilities.
+
+### Boundary Split
+
+Keep the public backend API stable:
+
+```text
+np.ndarray NCHW -> backend.forward(...) -> np.ndarray outputs
+```
+
+Inside the backend, add a pure MLX model API:
+
+```text
+mx.array NHWC -> model.forward(...) -> mx.array outputs
+```
+
+Rules for the model layer:
+
+- no numpy calls inside model forward;
+- no `np.asarray`, `np.arange`, or numpy dtype conversion inside compiled sections;
+- grids are generated with `mx.arange` or loaded/cached as MLX arrays keyed by shape;
+- NCHW/NHWC conversion happens only at the backend boundary.
+
+### MLX Modules
+
+Prefer `mlx.nn.Module` classes for the core model if they make state ownership cleaner:
+
+```text
+MlxComicTextDetector
+MlxYoloBlockDetector
+MlxYoloLayer
+MlxSegmentationHead
+MlxDbHead
+```
+
+This is not required for numerical parity, but it makes the model easier to reason about, easier to compile, and closer to normal MLX code.
+
+### Config Shape
+
+Replace the current audit-heavy `config.json` with a small runtime config. Move verbose conversion details into `conversion_report.json`.
+
+Target artifact layout:
+
+```text
+mlx-comictextdetector/
+  config.json
+  model.safetensors
+  conversion_report.json
+  README.md
+```
+
+Candidate `config.json`:
 
 ```json
 {
-  "schema": "comic_text_detector.mlx_conversion.v1",
-  "source": {
-    "checkpoint_path": ".../comictextdetector.pt",
-    "checkpoint_sha256": "...",
-    "checkpoint_url": "https://github.com/zyddnys/manga-image-translator/releases/download/beta-0.2.1/comictextdetector.pt",
-    "format": "comictextdetector.pt"
+  "model_type": "comic_text_detector",
+  "architectures": ["MlxComicTextDetector"],
+  "format_version": 1,
+  "torch_dtype": "float32",
+  "input_layout": "NCHW",
+  "internal_layout": "NHWC",
+  "image_size": 1024,
+  "num_classes": 2,
+  "id2label": {"0": "eng", "1": "ja"},
+  "label2id": {"eng": 0, "ja": 1},
+  "weights": {
+    "file": "model.safetensors",
+    "format": "safetensors",
+    "layout": "mlx-ohwi"
   },
-  "artifact": {
-    "file": "model.fp32.safetensors",
-    "dtype": "fp32",
-    "tensor_count": 670,
-    "total_elements": 23453232,
-    "total_bytes": 93813364,
-    "total_mib": 89.467
+  "fusion": {
+    "conv_bn": "load_time",
+    "trunk_bn_eps": 0.001,
+    "head_bn_eps": 0.00001
   },
-  "layouts": {
-    "public_input": "NCHW",
-    "mlx_internal_input": "NHWC",
-    "conv2d_weight": "OHWI",
-    "conv_transpose2d_weight": "OHWI"
+  "yolo": {
+    "depth_multiple": 0.33,
+    "width_multiple": 0.5,
+    "feature_indices": [1, 3, 5, 7, 9],
+    "detect_indices": [17, 20, 23],
+    "anchors": [
+      [[10, 13], [16, 30], [33, 23]],
+      [[30, 61], [62, 45], [59, 119]],
+      [[116, 90], [156, 198], [373, 326]]
+    ],
+    "layers": [
+      {"type": "Conv", "from": -1, "repeats": 1, "out_channels": 64, "kernel": 6, "stride": 2, "padding": 2},
+      {"type": "C3", "from": -1, "repeats": 3, "out_channels": 128, "shortcut": true}
+    ]
+  },
+  "heads": {
+    "segmentation": {"activation": "leaky"},
+    "db": {}
   }
 }
 ```
 
-Later full conversion/upload command shape:
+`conversion_report.json` should hold:
 
-```bash
-uv run --extra mlx python -m comic_text_detector.scripts.convert_to_mlx dump \
-  --checkpoint ~/.cache/manga-ocr/comictextdetector.pt \
-  --out-dir dist/mlx-comictextdetector \
-  --dtype fp32 \
-  --dtype bf16 \
-  --fixture /tmp/ctd-fixture \
-  --repo-id EndlessReform/comic-text-detector-mlx \
-  --upload
+- source checkpoint path, URL, and SHA256;
+- conversion command;
+- package versions;
+- tensor manifest;
+- transform counts;
+- per-tensor source/output shapes;
+- fixture parity summary.
+
+Normalize the YOLO config during conversion instead of preserving raw Torch cfg strings such as `"None"`, `"nc"`, and `"anchors"`.
+
+### Fusion Policy
+
+Choose one policy and encode it in config:
+
+- conversion-time fusion: save already folded Conv+BN weights where possible;
+- or load-time fusion: preserve original converted tensors, then fuse once after load.
+
+Either is fine. Avoid recomputing Conv+BN fusion inside every forward call. The current trunk caches fused weights, but the heads still recompute.
+
+### Compile
+
+MLX `0.31.2` provides:
+
+```python
+mx.compile(fun, inputs=None, outputs=None, shapeless=False)
 ```
 
-Artifact layout:
+Use it only after the model has a pure MLX forward. First target a fixed 1024-square compiled function. Defer `shapeless=True` until it proves valid.
+
+Add an optional compiled-forward parity test that skips when MLX or the local artifact is unavailable.
+
+## Round 2: Wire Into Mokuro
+
+After the idiomatic MLX cleanup, make MLX a real detector backend for mokuro without making normal installs brittle.
+
+### Artifact Discovery
+
+Add an MLX artifact cache path separate from the existing Torch checkpoint:
 
 ```text
-dist/mlx-comictextdetector/
-  config.json
-  model.fp32.safetensors
-  model.bf16.safetensors
-  README.md
-  fixture-report.json
+cache.comic_text_detector       # existing Torch .pt
+cache.comic_text_detector_mlx   # new MLX artifact dir or safetensors
 ```
 
-`config.json` should record:
+Do not pass the Torch `.pt` path to `backend="mlx"`.
 
-- source checkpoint SHA256
-- source detector git commit
-- model architecture version
-- activation mode (`leaky`)
-- input layout expected by loader (`NCHW` API, internal `NHWC`)
-- output names and shapes
-- dtype
-- conversion script version
+### User/API Surface
 
-Conversion steps:
-
-1. Load the upstream `.pt` bundle with `torch.load(..., map_location="cpu")`.
-2. Instantiate the Torch `TextDetBase` exactly as inference does.
-3. Fuse Conv+BN where possible before export if the MLX graph is designed around fused convs. If unfused, export BN running stats and affine parameters.
-4. Build the MLX module with the same layer graph.
-5. Convert tensors:
-   - Torch Conv2d: `(out, in, kh, kw)` -> MLX Conv2d: `(out, kh, kw, in)`.
-   - Torch ConvTranspose2d: verify against fixture; MLX core docs specify `(C_out, KH, KW, C_in)`.
-   - BatchNorm: preserve eval-mode affine/running stats or pre-fold into conv weights.
-   - Buffers: anchors, strides, grids if the YOLO decode is implemented inside MLX.
-6. Save `model.fp32.safetensors`.
-7. Cast floating arrays to `mx.bfloat16` and save `model.bf16.safetensors`.
-8. Load both artifacts back and run fixture parity.
-9. Upload with `huggingface_hub.HfApi.upload_file(...)` or `hf upload`.
-
-The MLX docs state that `mx.save_safetensors(...)` saves a dict of names to arrays, and `mx.load(...)` loads `.safetensors` into a dict. Hugging Face's hub docs show `HfApi.upload_file(...)` and `hf upload` as the normal single-file upload paths.
-
-Parity gates:
-
-- fp32 trunk feature max error target: start at `<= 1e-4`, relax only with measured explanation.
-- fp32 final tensors: `yolo_decoded`, `mask`, `lines` should be close enough that NMS/block output is unchanged on fixtures.
-- bf16 should compare against Torch autocast or a bf16 MLX baseline with looser tensor tolerances, but final block output should be tracked separately.
-- Conversion fails if final block JSON changes on the canonical fixture unless `--accept-output-drift` is supplied.
-
-## 5. Layer Breakout
-
-### Input
-
-Current Torch-facing input:
+Add detector backend plumbing through mokuro:
 
 ```text
-np image BGR uint8
--> cv2.cvtColor(..., BGR2RGB)
--> letterbox(...)
--> transpose HWC to CHW
--> normalize / 255
--> shape (N, 3, 1024, 1024)
+detector_backend = auto | torch | mlx | opencv
+detector_artifact_path = optional local override
 ```
 
-MLX-facing API should still accept this NCHW ndarray. The backend converts once internally:
+CLI shape, if exposed:
 
 ```text
-NCHW -> NHWC
+--detector-backend auto|torch|mlx|opencv
+--detector-artifact-path PATH
 ```
 
-The fixture should treat NCHW fp32 as the stable input DMZ. NHWC is a derived convenience artifact.
+### Auto Selection
 
-### Trunk
+Keep `auto` conservative:
 
-The trunk is the YOLOv5 block detector loaded by `load_yolov5_ckpt(...)` from `textdetector_dict["blk_det"]` (`comic_text_detector/basemodel.py:213`).
+- ONNX models select OpenCV;
+- `force_cpu` disables MLX auto-selection;
+- MLX auto-selection requires Apple Silicon, importable `mlx`, and an available/downloadable MLX artifact;
+- otherwise fall back to Torch with a clear log message.
 
-It returns:
+Explicit `backend="mlx"` should fail clearly if the extra or artifact is missing.
 
-- decoded YOLO boxes before NMS
-- selected feature maps at indices `[1, 3, 5, 7, 9]`
+### Tests
 
-The MLX implementation should start by matching only the inference graph used by the checkpoint:
+Add integration coverage:
 
-- `Conv`
-- `C3`
-- `Bottleneck`
-- `SPP/SPPF` if present in the checkpoint config
-- concat/route operations from YOLO parse config
-- final `Detect` decode
+- `backend="mlx"` reports a clear error without MLX or without an artifact;
+- `TextDetector(..., backend="mlx")` can be smoke-tested with a monkeypatched MLX-like backend returning ndarrays;
+- optional fixture-backed real MLX test runs when the local artifact exists;
+- mokuro passes detector backend/artifact settings through to `TextDetector`;
+- `force_cpu` prevents MLX auto-selection.
 
-Do not port training-only modules unless the checkpoint config requires them.
+## Benchmarks
 
-Risk: the YOLO `Detect` layer mutates grids and anchor grids in Torch. In MLX, implement deterministic grid creation from shape, anchors, and stride and include anchors/stride in `config.json` or safetensors.
+Benchmark after Round 1, not before. The current eager workbench path is useful for parity, but not representative of the intended MLX runtime.
 
-### Segmentation Head
+Measure:
 
-`UnetHead` takes feature maps `(f160, f80, f40, f20, f3)` and returns:
+- raw compute backend forward on fixture tensors;
+- `TextDetector.detect_batch(...)` including postprocess;
+- full mokuro volume run.
 
-- `mask`
-- feature tuple `(f80, f40, u40)` for the DB head in inference mode
+Compare:
 
-Core modules:
+- Torch CPU;
+- Torch MPS;
+- MLX GPU fp32 eager;
+- MLX GPU fp32 compiled;
+- MLX bf16 if implemented.
 
-- `double_conv_c3`
-- `double_conv_up_c3`
-- `ConvTranspose2d`
-- `BatchNorm2d`
-- ReLU
-- final sigmoid
-
-For MLX, decide early whether to fold BN into neighboring convs. Folding simplifies runtime and reduces parity surface. Keep an unfused reference path available until the fixture passes.
-
-### DB Head
-
-`DBHead` takes `(f80, f40, u40)` and returns two maps in eval mode:
+For Apple Silicon, test detector batch sizes:
 
 ```text
-cat(shrink_maps, threshold_maps), shape (N, 2, H, W)
+1, 4, 8, 16, 32
 ```
 
-The current postprocess only uses the first channel through `SegDetectorRepresenter.__call__`, which indexes `pred[:, 0, :, :]`. Keep both channels in the output contract anyway because it preserves the current model boundary and makes parity testing less confusing.
+Track both speed and output stability:
 
-### Postprocess
-
-Keep in existing code:
-
-- `non_max_suppression(...)`
-- line extraction via `SegDetectorRepresenter`
-- mask conversion/resizing
-- `group_output(...)`
-- `refine_mask(...)`
-- `refine_undetected_mask(...)`
-
-The MLX backend should return ndarrays that can be fed into the same postprocess helpers. If helpers currently require Torch methods, update them to accept numpy arrays at the boundary rather than wrapping MLX outputs back into Torch.
-
-## Implementation Stages
-
-### Stage A: Packaging
-
-- Add `comic_text_detector/pyproject.toml`.
-- Move detector runtime requirements from `requirements.txt` to pyproject.
-- Add `comic-text-detector[mlx]`.
-- Update mokuro root `pyproject.toml` to depend on `comic-text-detector`, add `mokuro[mlx]`, add uv editable path source, and stop packaging `comic_text_detector*` directly.
-- Verify `uv sync`, `uv sync --extra mlx`, and imports.
-
-### Stage B: Fixture
-
-- Add the fixture dump script.
-- Add CPU fixture tests for single and batch.
-- Commit a tiny fixture manifest or generated test output only if it is small enough for the repo; otherwise document exact generation commands.
-
-### Stage C: MLX Skeleton
-
-- Add `comic_text_detector/mlx_backend/`.
-- Implement model classes with random weights first.
-- Load safetensors and config.
-- Run fixture shape checks.
-
-### Stage D: Layer Parity
-
-- Port trunk until selected feature maps pass.
-- Port segmentation head until `mask` passes.
-- Port DB head until `lines` passes.
-- Only then wire `TextDetector(..., backend="mlx")`.
-
-### Stage E: Mokuro Integration
-
-- Add optional detector backend argument only if needed.
-- Ensure `force_cpu` disables MLX auto-selection.
-- Add an integration smoke test that monkeypatches an MLX-like backend returning ndarray outputs.
-
-### Stage F: Benchmarks
-
-Benchmark at three levels:
-
-- raw compute backend forward on fixture tensors
-- `TextDetector.detect_batch(...)` including postprocess
-- full mokuro volume run with `--detector-batch-size`, `--ocr-batch-size`, and `--ocr-bf16`
-
-Record CPU, MPS/Torch, MLX fp32, and MLX bf16 on at least one M-series machine. On M5+, include batch sizes 1, 4, 8, 16, and 32 to find the memory/performance knee.
+- raw tensor drift;
+- binary mask pixel disagreement;
+- NMS block count and coordinates;
+- final `TextBlock` JSON drift.
 
 ## Open Questions
 
-- Does MLX bf16 produce stable enough detector outputs for block grouping, or should bf16 be opt-in even inside `mokuro[mlx]`?
-- Should YOLO decode live in MLX or remain numpy postprocess? Keeping decode in MLX better matches the current `TextDetBase.forward(...)` output, but returning raw head logits would make the backend boundary less drop-in.
-- Should conversion fold every Conv+BN pair, including heads, or preserve BN modules for simpler state-dict traceability?
-- Where should the official MLX artifact live: detector fork owner namespace, mokuro namespace, or an upstream-compatible `comic-text-detector-mlx` model repo?
-- Should the default cache downloader learn about `model.fp32.safetensors` and `model.bf16.safetensors`, or should MLX artifact paths be explicit until the backend has shipped?
+- Should bf16 be opt-in, or can it be the default MLX artifact after final block parity is measured?
+- Should official artifacts live under mokuro, the detector fork, or a separate `comic-text-detector-mlx` model repo?
+- Should conversion-time Conv+BN fusion be preferred over load-time fusion for the published artifact?
+- Should MLX auto-selection ever download artifacts automatically, or should the first shipped version require an explicit artifact path?
+- After compiled MLX is benchmarked, is any postprocess step worth moving out of Python/OpenCV?
 
 ## References
 
-- uv dependency fields, optional dependencies, and path/editable sources: https://docs.astral.sh/uv/concepts/projects/dependencies/
-- uv editable mode: https://docs.astral.sh/uv/concepts/projects/config/#editable-mode
-- uv workspaces and editable workspace dependencies: https://docs.astral.sh/uv/concepts/projects/workspaces/
 - MLX saving/loading arrays and safetensors: https://ml-explore.github.io/mlx/build/html/usage/saving_and_loading.html
 - MLX Conv2d NHWC layout: https://ml-explore.github.io/mlx/build/html/python/nn/_autosummary/mlx.nn.Conv2d.html
 - MLX conv_transpose2d shape notes: https://ml-explore.github.io/mlx/build/html/python/_autosummary/mlx.core.conv_transpose2d.html

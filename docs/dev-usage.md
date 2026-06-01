@@ -152,3 +152,15 @@ batch-final.json
 `manifest.json` records the checkpoint path and SHA256, image paths and SHA256 values, input size, activation, dtype, device, thresholds, package versions, and the generated split summaries. The `.npz` files contain fixed ndarray values for the framework boundary and postprocess checkpoints, including NCHW/NHWC inputs, resize metadata, selected trunk feature maps, decoded YOLO head output, raw mask/line heads, NMS values/counts, line values/counts, and input-canvas `post.mask_uint8`.
 
 Use CPU for canonical fixtures. The default `--device cpu` and `--torch-threads 1` are chosen for deterministic fixture generation.
+
+### Running Mokuro With A Local MLX Detector
+
+After converting a local detector artifact, mokuro can use it explicitly:
+
+```bash
+uv run --extra mlx mokuro ./my-volume \
+  --detector-backend mlx \
+  --detector-model-path output/detector/mlx-comictextdetector
+```
+
+`--detector-compute-device cpu` uses the strict parity path. Omitting it lets MLX use its default device, which is usually faster on Apple Silicon but can have small final-coordinate drift from the GPU convolution kernels.

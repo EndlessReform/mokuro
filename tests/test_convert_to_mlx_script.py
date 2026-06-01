@@ -4,8 +4,10 @@ import torch
 
 from comic_text_detector.scripts.convert_to_mlx import (
     build_safetensors_payload,
+    build_yolo_layers,
     collect_tensors,
     convert_tensor_for_mlx,
+    normalize_anchors,
     render_keys_report,
 )
 
@@ -88,3 +90,41 @@ def test_build_safetensors_payload_records_layout_metadata():
         "scalar": "none",
         "text_det.binarize.3.weight": "conv_transpose2d_iohw_to_ohwi",
     }
+
+
+def test_build_yolo_layers_emits_scaled_layer_shapes():
+    cfg = {
+        "anchors": [[10, 13, 16, 30, 33, 23]],
+        "nc": 2,
+        "ch": 3,
+        "depth_multiple": 0.33,
+        "width_multiple": 0.5,
+        "backbone": [
+            [-1, 1, "Conv", [64, 6, 2, 2]],
+            [-1, 6, "C3", [128]],
+        ],
+        "head": [
+            [[-1, 0], 1, "Concat", [1]],
+            [[1], 1, "Detect", ["nc", "anchors"]],
+        ],
+    }
+
+    layers = build_yolo_layers(cfg)
+
+    assert layers[0].to_dict() == {
+        "from": -1,
+        "in_channels": 3,
+        "kernel": 6,
+        "out_channels": 32,
+        "padding": 2,
+        "repeats": 1,
+        "stride": 2,
+        "type": "Conv",
+    }
+    assert layers[1].repeats == 2
+    assert layers[1].out_channels == 64
+    assert layers[2].in_channels == [64, 32]
+    assert layers[2].out_channels == 96
+    assert layers[3].in_channels == [64]
+    assert layers[3].out_channels == 21
+    assert normalize_anchors(cfg["anchors"]) == (((10, 13), (16, 30), (33, 23)),)
