@@ -156,6 +156,29 @@ These options are mainly useful for profiling, model experiments, and tuning bat
 --dev_repeat_ocr_batch_size: DEV ONLY. Artificially batch each OCR crop by repeating it N times, return only the first decoded output, and discard the rest. This is a smoke-test knob for generation batching overhead, not a real batching implementation.
 ```
 
+### Configuration file
+
+Instead of passing batch sizes or precision on every invocation, you can place a `config.toml` at the standard XDG location:
+
+```toml
+# ~/.config/mokuro-fast/config.toml
+precision = "bf16"  # or "f32"
+
+[batch]
+detector = 30
+ocr = 60
+```
+
+On Linux/macOS this reads from `$XDG_CONFIG_HOME/mokuro-fast/config.toml` (defaulting to `~/.config/mokuro-fast/config.toml`).
+
+To use a custom file, pass `--config`:
+
+```bash
+mokuro-fast ./vol1 --config /path/to/my-config.toml
+```
+
+**Precedence:** CLI flags always win, then the explicit `--config` file, then the default XDG location, then hardcoded defaults.
+
 Fire also accepts hyphenated option names, for example:
 
 ```bash

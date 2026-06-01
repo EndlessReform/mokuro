@@ -9,6 +9,7 @@ from loguru import logger
 
 from mokuro_fast import MokuroGenerator
 from mokuro_fast import __version__
+from mokuro_fast.config import _UNSET, get_batch_detector, get_batch_ocr, get_precision
 from mokuro_fast.legacy.overlay_generator import generate_legacy_html
 from mokuro_fast.volume import VolumeCollection
 
@@ -43,11 +44,12 @@ def run(
     compile: bool = False,
     ocr_bf16: bool = False,
     dev_repeat_ocr_batch_size: int = 1,
-    detector_batch_size: int = 4,
+    detector_batch_size: int = -1,  # sentinel – resolved from config or default below
     detector_backend: str = "auto",
     detector_model_path: Optional[Union[str, Path]] = None,
     detector_compute_device: Optional[str] = None,
-    ocr_batch_size: int = 1,
+    ocr_batch_size: int = -1,  # sentinel – resolved from config or default below
+    config: Optional[Union[str, Path]] = None,
     ocr_reorder_buffer_size: Optional[int] = None,
 ):
     """
@@ -78,6 +80,7 @@ def run(
         detector_backend: Text detector compute backend: auto, torch, opencv, or mlx.
         detector_model_path: Optional detector model path. Supports local paths, ``hf://username/repo``, or plain ``username/repo`` for HuggingFace Hub models. For MLX without this flag, defaults to ``jkeisling/comictextdetector-mlx``.
         detector_compute_device: Optional detector backend compute device. For MLX, use cpu or gpu; None keeps the backend default.
+        config: Path to a custom config.toml file. Overrides the default XDG location (~/.config/mokuro-fast/config.toml).
         ocr_batch_size: Number of OCR crops to run through decoder generation in one batch.
         ocr_reorder_buffer_size: Number of OCR crop requests to stage before OCR batching. Reserved for future crop reordering; current behavior preserves request order.
     """
@@ -91,8 +94,30 @@ def run(
     dev_repeat_ocr_batch_size = _coerce_optional_int(
         dev_repeat_ocr_batch_size, "dev_repeat_ocr_batch_size"
     )
-    detector_batch_size = _coerce_optional_int(detector_batch_size, "detector_batch_size")
-    ocr_batch_size = _coerce_optional_int(ocr_batch_size, "ocr_batch_size")
+
+    # --- Resolve batch sizes: CLI > config file > hardcoded default ---
+    cfg_path = str(config) if config else None
+    if detector_batch_size < 0:
+        detector_batch_size = get_batch_detector(cfg_path)
+    if detector_batch_size is _UNSET or (isinstance(detector_batch_size, int) and detector_batch_size < 1):
+        detector_batch_size = 4
+    else:
+        detector_batch_size = _coerce_optional_int(detector_batch_size, "detector_batch_size")
+
+    if ocr_batch_size < 0:
+        ocr_batch_size = get_batch_ocr(cfg_path)
+    if ocr_batch_size is _UNSET or (isinstance(ocr_batch_size, int) and ocr_batch_size < 1):
+        ocr_batch_size = 1
+    else:
+        ocr_batch_size = _coerce_optional_int(ocr_batch_size, "ocr_batch_size")
+
+    # --- Resolve precision: CLI > config file (no hardcoded default for bf16) ---
+    if not bf16 and not ocr_bf16:
+        precision = get_precision(cfg_path)
+        if precision == "bf16":
+            bf16 = True
+            ocr_bf16 = True
+
     ocr_reorder_buffer_size = _coerce_optional_int(
         ocr_reorder_buffer_size, "ocr_reorder_buffer_size"
     )
