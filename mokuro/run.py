@@ -38,7 +38,7 @@ def run(
     timings_file: Optional[Union[str, Path]] = None,
     ocr_summary_file: Optional[Union[str, Path]] = None,
     page_limit: Optional[int] = None,
-    ocr_num_beams: Optional[int] = None,
+    ocr_num_beams: int = 1,
     bf16: bool = False,
     compile: bool = False,
     ocr_bf16: bool = False,
@@ -69,7 +69,7 @@ def run(
         timings_file: Path to a JSONL file to write per-chunk OCR timing records. Each line contains page, block, line, chunk indices plus crop dimensions and OCR latency in milliseconds.
         ocr_summary_file: Path to a JSON file to write run-level OCR batch yield and token-raggedness summary statistics.
         page_limit: Process only the first N pages of each volume. If None, process all pages.
-        ocr_num_beams: Override the OCR model beam count passed to transformers generate(). If None, use the model generation config.
+        ocr_num_beams: Number of beams for the OCR model (default 1, i.e. greedy decoding). Set > 1 for beam search.
         bf16: Enable bfloat16 for both OCR and the MLX detector. Requires an MLX detector backend.
         compile: Compile MLX detector conv blocks with variable-shape support. Requires an MLX detector backend.
         ocr_bf16: Cast the OCR model and image inputs to bfloat16 on CUDA/MPS. Ignored on CPU.

@@ -164,7 +164,7 @@ class MangaPageOcr:
         max_ratio_hor=8,
         anchor_window=2,
         disable_ocr=False,
-        ocr_num_beams=None,
+        ocr_num_beams=1,
         bf16=False,
         ocr_bf16=False,
         dev_repeat_ocr_batch_size=1,
