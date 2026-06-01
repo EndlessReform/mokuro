@@ -146,8 +146,8 @@ These options are mainly useful for profiling, model experiments, and tuning bat
 --compile: Compile MLX detector conv blocks with variable-shape support. Requires an MLX detector backend.
 --ocr_bf16: Cast the OCR model and image inputs to bfloat16 on CUDA/MPS. Ignored on CPU.
 --detector_batch_size: Number of uncached pages to run through the text detector in one batch.
---detector_backend: Text detector compute backend: auto, torch, opencv, or mlx.
---detector_model_path: Optional detector model path. For MLX, pass the converted artifact directory or model.safetensors path.
+--detector_backend: Text detector compute backend: auto, torch, opencv, or mlx. With ``auto``, Apple Silicon Macs default to MLX; other platforms default to PyTorch.
+--detector_model_path: Optional detector model path. Accepts a local path, ``hf://username/repo``, or plain ``username/repo`` for HuggingFace Hub models. For MLX without this flag, defaults to ``jkeisling/comictextdetector-mlx``.
 --detector_compute_device: Optional detector compute device. For MLX, use cpu or gpu; omitted uses the backend default.
 --ocr_batch_size: Number of OCR crops to run through decoder generation in one batch.
 --ocr_reorder_buffer_size: Number of OCR crop requests to stage before OCR batching. This is reserved for future crop reordering; current behavior preserves request order.

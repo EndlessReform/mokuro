@@ -76,7 +76,7 @@ def run(
         dev_repeat_ocr_batch_size: DEV ONLY. Artificially batch each OCR crop by repeating it N times, return only the first decoded output, and discard the rest. This is a smoke-test knob for generation batching overhead, not a real batching implementation.
         detector_batch_size: Number of uncached pages to run through the text detector in one batch.
         detector_backend: Text detector compute backend: auto, torch, opencv, or mlx.
-        detector_model_path: Optional detector model path. For MLX, pass the converted artifact directory or model.safetensors path.
+        detector_model_path: Optional detector model path. Supports local paths, ``hf://username/repo``, or plain ``username/repo`` for HuggingFace Hub models. For MLX without this flag, defaults to ``jkeisling/comictextdetector-mlx``.
         detector_compute_device: Optional detector backend compute device. For MLX, use cpu or gpu; None keeps the backend default.
         ocr_batch_size: Number of OCR crops to run through decoder generation in one batch.
         ocr_reorder_buffer_size: Number of OCR crop requests to stage before OCR batching. Reserved for future crop reordering; current behavior preserves request order.

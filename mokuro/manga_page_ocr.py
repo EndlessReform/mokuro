@@ -229,16 +229,25 @@ class MangaPageOcr:
                 device = "mps"
             else:
                 device = "cpu"
-            if self.detector_backend == "mlx" and self.detector_model_path is None:
-                raise ValueError(
-                    "detector_model_path is required for detector_backend='mlx' until an official MLX artifact is configured"
-                )
+            # MLX backend now has a default HF model, so no explicit path needed
+            pass  # removed: detector_model_path requirement for mlx backend
             if self.bf16 and self.detector_model_path is None and self.detector_backend != "mlx":
                 raise ValueError("--bf16 requires an MLX detector backend and artifact")
             if self.detector_compile and self.detector_model_path is None and self.detector_backend != "mlx":
                 raise ValueError("--compile requires an MLX detector backend and artifact")
 
-            detector_model_path = self.detector_model_path or cache.comic_text_detector
+            # Resolve backend first (auto may pick mlx on Apple Silicon)
+            tentative_backend = TextDetector._resolve_backend(
+                None,  # no explicit path yet
+                self.detector_backend,
+            )
+            # Pick model path: explicit > backend-specific default > torch checkpoint
+            if self.detector_model_path is not None:
+                detector_model_path = self.detector_model_path
+            elif tentative_backend == "mlx":
+                detector_model_path = None  # MLX resolves to default HF model
+            else:
+                detector_model_path = cache.comic_text_detector
             resolved_detector_backend = TextDetector._resolve_backend(
                 detector_model_path,
                 self.detector_backend,
