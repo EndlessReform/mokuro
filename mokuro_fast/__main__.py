@@ -1,6 +1,6 @@
 import fire
 
-from mokuro.run import run
+from mokuro_fast.run import run
 
 
 def main():

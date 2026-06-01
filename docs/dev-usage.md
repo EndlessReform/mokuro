@@ -124,3 +124,61 @@ What it does **not** test:
 - It does not produce better OCR output; the extra decoded strings are thrown away.
 
 Use `--no-cache` when comparing runs, otherwise cached pages will skip OCR and produce no timing rows.
+
+## Detector MLX Fixture
+
+Use the detector fixture dumper when working on the MLX detector port. It records the current Torch detector as plain ndarray artifacts plus final public detector JSON:
+
+```bash
+uv run python -m comic_text_detector.scripts.dump_detector_fixture \
+  --image tests/data/input/test0/vol1/000a.jpg \
+  --batch-image tests/data/input/test0/vol1/001a.jpg \
+  --input-size 1024 \
+  --out /tmp/ctd-fixture
+```
+
+By default, the script uses the same checkpoint mokuro uses: `${XDG_CACHE_HOME:-~/.cache}/manga-ocr/comictextdetector.pt`. If the checkpoint is missing, it downloads mokuro's default detector artifact. Pass `--checkpoint /path/to/comictextdetector.pt` only when testing another detector file.
+
+The output directory contains:
+
+```text
+manifest.json
+single.npz
+batch.npz
+single-final.json
+batch-final.json
+```
+
+`manifest.json` records the checkpoint path and SHA256, image paths and SHA256 values, input size, activation, dtype, device, thresholds, package versions, and the generated split summaries. The `.npz` files contain fixed ndarray values for the framework boundary and postprocess checkpoints, including NCHW/NHWC inputs, resize metadata, selected trunk feature maps, decoded YOLO head output, raw mask/line heads, NMS values/counts, line values/counts, and input-canvas `post.mask_uint8`.
+
+Use CPU for canonical fixtures. The default `--device cpu` and `--torch-threads 1` are chosen for deterministic fixture generation.
+
+### Running Mokuro With A Local MLX Detector
+
+After converting a local detector artifact, mokuro can use it explicitly:
+
+```bash
+uv run --extra mlx mokuro ./my-volume \
+  --detector-backend mlx \
+  --detector-model-path output/detector/mlx-comictextdetector
+```
+
+`--detector-compute-device cpu` uses the strict parity path. Omitting it lets MLX use its default device, which is usually faster on Apple Silicon but can have small final-coordinate drift from the GPU convolution kernels.
+
+Use `--bf16` with the MLX detector to run both the detector and OCR in bfloat16 where the selected devices support it:
+
+```bash
+uv run --extra mlx mokuro ./my-volume \
+  --detector-backend mlx \
+  --detector-model-path output/detector/mlx-comictextdetector \
+  --bf16
+```
+
+Use `--compile` to wrap the MLX detector's conv-heavy blocks in `mx.compile(..., shapeless=True)`, allowing those compiled functions to accept variable input shapes without recompiling for every height/width change. Shape-heavy pieces such as SPPF pooling and YOLO decode stay eager:
+
+```bash
+uv run --extra mlx mokuro ./my-volume \
+  --detector-backend mlx \
+  --detector-model-path output/detector/mlx-comictextdetector \
+  --compile
+```

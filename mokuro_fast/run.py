@@ -7,10 +7,10 @@ from typing import Sequence, Optional, Union
 import fire
 from loguru import logger
 
-from mokuro import MokuroGenerator
-from mokuro import __version__
-from mokuro.legacy.overlay_generator import generate_legacy_html
-from mokuro.volume import VolumeCollection
+from mokuro_fast import MokuroGenerator
+from mokuro_fast import __version__
+from mokuro_fast.legacy.overlay_generator import generate_legacy_html
+from mokuro_fast.volume import VolumeCollection
 
 
 def _coerce_optional_int(value, name):
@@ -38,10 +38,15 @@ def run(
     timings_file: Optional[Union[str, Path]] = None,
     ocr_summary_file: Optional[Union[str, Path]] = None,
     page_limit: Optional[int] = None,
-    ocr_num_beams: Optional[int] = None,
+    ocr_num_beams: int = 1,
+    bf16: bool = False,
+    compile: bool = False,
     ocr_bf16: bool = False,
     dev_repeat_ocr_batch_size: int = 1,
     detector_batch_size: int = 4,
+    detector_backend: str = "auto",
+    detector_model_path: Optional[Union[str, Path]] = None,
+    detector_compute_device: Optional[str] = None,
     ocr_batch_size: int = 1,
     ocr_reorder_buffer_size: Optional[int] = None,
 ):
@@ -64,10 +69,15 @@ def run(
         timings_file: Path to a JSONL file to write per-chunk OCR timing records. Each line contains page, block, line, chunk indices plus crop dimensions and OCR latency in milliseconds.
         ocr_summary_file: Path to a JSON file to write run-level OCR batch yield and token-raggedness summary statistics.
         page_limit: Process only the first N pages of each volume. If None, process all pages.
-        ocr_num_beams: Override the OCR model beam count passed to transformers generate(). If None, use the model generation config.
+        ocr_num_beams: Number of beams for the OCR model (default 1, i.e. greedy decoding). Set > 1 for beam search.
+        bf16: Enable bfloat16 for both OCR and the MLX detector. Requires an MLX detector backend.
+        compile: Compile MLX detector conv blocks with variable-shape support. Requires an MLX detector backend.
         ocr_bf16: Cast the OCR model and image inputs to bfloat16 on CUDA/MPS. Ignored on CPU.
         dev_repeat_ocr_batch_size: DEV ONLY. Artificially batch each OCR crop by repeating it N times, return only the first decoded output, and discard the rest. This is a smoke-test knob for generation batching overhead, not a real batching implementation.
         detector_batch_size: Number of uncached pages to run through the text detector in one batch.
+        detector_backend: Text detector compute backend: auto, torch, opencv, or mlx.
+        detector_model_path: Optional detector model path. Supports local paths, ``hf://username/repo``, or plain ``username/repo`` for HuggingFace Hub models. For MLX without this flag, defaults to ``jkeisling/comictextdetector-mlx``.
+        detector_compute_device: Optional detector backend compute device. For MLX, use cpu or gpu; None keeps the backend default.
         ocr_batch_size: Number of OCR crops to run through decoder generation in one batch.
         ocr_reorder_buffer_size: Number of OCR crop requests to stage before OCR batching. Reserved for future crop reordering; current behavior preserves request order.
     """
@@ -194,9 +204,14 @@ def run(
         disable_ocr=disable_ocr,
         timings_fh=timings_fh,
         ocr_num_beams=ocr_num_beams,
+        bf16=bf16,
+        detector_compile=compile,
         ocr_bf16=ocr_bf16,
         dev_repeat_ocr_batch_size=dev_repeat_ocr_batch_size,
         detector_batch_size=detector_batch_size,
+        detector_backend=detector_backend,
+        detector_model_path=detector_model_path,
+        detector_compute_device=detector_compute_device,
         ocr_batch_size=ocr_batch_size,
         ocr_reorder_buffer_size=ocr_reorder_buffer_size,
     )

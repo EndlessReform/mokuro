@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Any
 
 import requests
 from loguru import logger
@@ -29,6 +30,28 @@ class cache:
                     if chunk:
                         f.write(chunk)
             logger.info(f"Finished downloading {url}")
+
+
+    @property
+    def comic_text_detector_mlx(self) -> Path:
+        """Return the path to the MLX detector artifact, downloading from HF Hub if needed."""
+        try:
+            from huggingface_hub import snapshot_download
+        except ModuleNotFoundError:
+            raise RuntimeError(
+                "huggingface-hub is required for MLX detector artifacts. "
+                "Install mokuro[mlx] to enable it."
+            )
+
+        repo_id = "jkeisling/comictextdetector-mlx"
+        cache_dir = self.root / "mlx"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            local_dir = snapshot_download(repo_id, cache_dir=str(cache_dir))
+            return Path(local_dir)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to download MLX detector artifact from {repo_id}: {exc}") from exc
 
 
 cache = cache()

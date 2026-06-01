@@ -3,10 +3,10 @@ from json import JSONDecodeError
 from loguru import logger
 from tqdm import tqdm
 
-from mokuro import __version__
-from mokuro.manga_page_ocr import MangaPageOcr, summarize_ocr_batch_stats
-from mokuro.utils import dump_json, load_json
-from mokuro.volume import Volume
+from mokuro_fast import __version__
+from mokuro_fast.manga_page_ocr import MangaPageOcr, summarize_ocr_batch_stats
+from mokuro_fast.utils import dump_json, load_json
+from mokuro_fast.volume import Volume
 
 
 class MokuroGenerator:
@@ -67,30 +67,36 @@ class MokuroGenerator:
         img_path_items = list(img_paths.values())[:page_limit]
         pending_pages = []
 
-        for page_idx, img_path_rel in enumerate(tqdm(img_path_items, desc="Processing pages...")):
-            try:
-                json_path = (volume.path_ocr_cache / img_path_rel).with_suffix(".json")
-
+        with tqdm(img_path_items, desc="Processing pages...", disable=False) as pbar:
+            for page_idx, img_path_rel in enumerate(img_path_items):
                 try:
-                    load_json(json_path)
-                    already_processed = True
-                except (FileNotFoundError, JSONDecodeError, UnicodeDecodeError):
-                    already_processed = False
+                    json_path = (volume.path_ocr_cache / img_path_rel).with_suffix(".json")
 
-                if no_cache or not already_processed:
-                    self.init_models()
-                    pending_pages.append((page_idx, img_path_rel, json_path))
-                    if len(pending_pages) >= self.mpocr.detector_batch_size:
-                        self._process_pending_pages(volume, pending_pages, ignore_errors=ignore_errors)
-                        pending_pages = []
-            except Exception as e:
-                if ignore_errors:
-                    logger.error(e)
-                else:
-                    raise e
+                    try:
+                        load_json(json_path)
+                        already_processed = True
+                    except (FileNotFoundError, JSONDecodeError, UnicodeDecodeError):
+                        already_processed = False
 
-        if pending_pages:
-            self._process_pending_pages(volume, pending_pages, ignore_errors=ignore_errors)
+                    if no_cache or not already_processed:
+                        self.init_models()
+                        pending_pages.append((page_idx, img_path_rel, json_path))
+                        if len(pending_pages) >= self.mpocr.detector_batch_size:
+                            self._process_pending_pages(volume, pending_pages, ignore_errors=ignore_errors)
+                            pbar.update(len(pending_pages))
+                            pending_pages = []
+                    else:
+                        # cached page — advance bar immediately
+                        pbar.update(1)
+                except Exception as e:
+                    if ignore_errors:
+                        logger.error(e)
+                    else:
+                        raise e
+
+            if pending_pages:
+                self._process_pending_pages(volume, pending_pages, ignore_errors=ignore_errors)
+                pbar.update(len(pending_pages))
 
         self.generate_mokuro_file(volume, ignore_errors=ignore_errors, page_limit=page_limit)
 

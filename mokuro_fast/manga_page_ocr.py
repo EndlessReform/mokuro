@@ -11,9 +11,9 @@ from scipy.signal.windows import gaussian
 from comic_text_detector.inference import TextDetector
 from manga_ocr import MangaOcr
 from manga_ocr.ocr import post_process
-from mokuro import __version__
-from mokuro.cache import cache
-from mokuro.utils import imread
+from mokuro_fast import __version__
+from mokuro_fast.cache import cache
+from mokuro_fast.utils import imread
 import torch
 
 
@@ -164,10 +164,15 @@ class MangaPageOcr:
         max_ratio_hor=8,
         anchor_window=2,
         disable_ocr=False,
-        ocr_num_beams=None,
+        ocr_num_beams=1,
+        bf16=False,
         ocr_bf16=False,
         dev_repeat_ocr_batch_size=1,
         detector_batch_size=4,
+        detector_backend="auto",
+        detector_model_path=None,
+        detector_compute_device=None,
+        detector_compile=False,
         ocr_batch_size=1,
         ocr_reorder_buffer_size=None,
     ):
@@ -177,9 +182,14 @@ class MangaPageOcr:
         self.anchor_window = anchor_window
         self.disable_ocr = disable_ocr
         self.ocr_num_beams = ocr_num_beams
-        self.ocr_bf16 = ocr_bf16
+        self.bf16 = bf16
+        self.ocr_bf16 = ocr_bf16 or bf16
         self.dev_repeat_ocr_batch_size = dev_repeat_ocr_batch_size
         self.detector_batch_size = detector_batch_size
+        self.detector_backend = detector_backend
+        self.detector_model_path = detector_model_path
+        self.detector_compute_device = detector_compute_device
+        self.detector_compile = detector_compile
         self.ocr_batch_size = ocr_batch_size
         self.ocr_reorder_buffer_size = (
             ocr_batch_size if ocr_reorder_buffer_size is None else ocr_reorder_buffer_size
@@ -219,9 +229,45 @@ class MangaPageOcr:
                 device = "mps"
             else:
                 device = "cpu"
-            logger.info(f"Initializing text detector, using device {device}")
+            # MLX backend now has a default HF model, so no explicit path needed
+
+            # Resolve backend first (auto may pick mlx on Apple Silicon)
+            tentative_backend = TextDetector._resolve_backend(
+                None,  # no explicit path yet
+                self.detector_backend,
+            )
+            # Pick model path: explicit > backend-specific default > torch checkpoint
+            if self.detector_model_path is not None:
+                detector_model_path = self.detector_model_path
+            elif tentative_backend == "mlx":
+                detector_model_path = None  # MLX resolves to default HF model
+            else:
+                detector_model_path = cache.comic_text_detector
+            resolved_detector_backend = TextDetector._resolve_backend(
+                detector_model_path,
+                self.detector_backend,
+            )
+            if self.bf16 and resolved_detector_backend != "mlx":
+                raise ValueError("--bf16 requires an MLX detector backend")
+            if self.detector_compile and resolved_detector_backend != "mlx":
+                raise ValueError("--compile requires an MLX detector backend")
+            detector_compute_device = self.detector_compute_device
+            if detector_compute_device is None and force_cpu:
+                detector_compute_device = "cpu"
+            detector_compute_dtype = "bf16" if self.bf16 else None
+            logger.info(
+                f"Initializing text detector, backend {resolved_detector_backend}, "
+                f"using device {device}"
+            )
             self.text_detector = TextDetector(
-                model_path=cache.comic_text_detector, input_size=detector_input_size, device=device, act="leaky"
+                model_path=detector_model_path,
+                input_size=detector_input_size,
+                device=device,
+                act="leaky",
+                backend=resolved_detector_backend,
+                compute_device=detector_compute_device,
+                compute_dtype=detector_compute_dtype,
+                compile_model=self.detector_compile,
             )
             self.mocr = MangaOcr(pretrained_model_name_or_path, force_cpu)
             self._configure_ocr_dtype()

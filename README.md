@@ -43,18 +43,48 @@ try installing Python from the [official site](https://www.python.org/downloads)
 If you want to run with GPU, install PyTorch as described [here](https://pytorch.org/get-started/locally/#start-locally),
 otherwise this step can be skipped.
 
-Run in command line:
+Install the command line app from source with [uv](https://docs.astral.sh/uv/):
 
-```commandline
-pip3 install mokuro
+```bash
+uv tool install mokuro-fast --from git+https://github.com/EndlessReform/mokuro.git
 ```
+
+To upgrade an existing install:
+
+```bash
+uv tool upgrade mokuro-fast
+```
+
+# Development
+
+This fork uses uv for dependency management and local commands.
+
+Clone the repository with its detector submodule, then create the local environment:
+
+```bash
+git clone --recurse-submodules https://github.com/<your-user>/mokuro.git
+cd mokuro
+uv sync --dev
+```
+
+Run project commands through uv:
+
+```bash
+uv run mokuro-fast /path/to/manga/vol1
+uv run pytest
+uv run ruff check .
+uv run ruff format .
+uv build
+```
+
+`uv.lock` is checked in. Use `uv sync --locked --dev` when you want to verify the current lockfile exactly, and `uv lock` after changing dependencies in `pyproject.toml`.
 
 # Usage
 
 ## Run on one volume
 
 ```bash
-mokuro /path/to/manga/vol1
+mokuro-fast /path/to/manga/vol1
 ```
 
 This will generate `/path/to/manga/vol1.html` file, which you can open in a browser.
@@ -62,13 +92,13 @@ This will generate `/path/to/manga/vol1.html` file, which you can open in a brow
 If your path contains spaces, enclose it in double quotes, like this:
 
 ```bash
-mokuro "/path/to/manga/volume 1"
+mokuro-fast "/path/to/manga/volume 1"
 ```
 
 ## Run on multiple volumes
 
 ```bash
-mokuro /path/to/manga/vol1 /path/to/manga/vol2 /path/to/manga/vol3
+mokuro-fast /path/to/manga/vol1 /path/to/manga/vol2 /path/to/manga/vol3
 ```
 
 For each volume, a separate HTML file will be generated.
@@ -87,7 +117,7 @@ manga_title/
 You can process all volumes by running:
 
 ```bash
-mokuro --parent_dir manga_title/
+mokuro-fast --parent_dir manga_title/
 ```
 
 ## Other options
@@ -112,8 +142,13 @@ These options are mainly useful for profiling, model experiments, and tuning bat
 
 ```
 --ocr_num_beams: Override the OCR model beam count passed to transformers generate(). If None, use the model generation config.
+--bf16: Enable bfloat16 for both OCR and the MLX detector. Requires an MLX detector backend.
+--compile: Compile MLX detector conv blocks with variable-shape support. Requires an MLX detector backend.
 --ocr_bf16: Cast the OCR model and image inputs to bfloat16 on CUDA/MPS. Ignored on CPU.
 --detector_batch_size: Number of uncached pages to run through the text detector in one batch.
+--detector_backend: Text detector compute backend: auto, torch, opencv, or mlx. With ``auto``, Apple Silicon Macs default to MLX; other platforms default to PyTorch.
+--detector_model_path: Optional detector model path. Accepts a local path, ``hf://username/repo``, or plain ``username/repo`` for HuggingFace Hub models. For MLX without this flag, defaults to ``jkeisling/comictextdetector-mlx``.
+--detector_compute_device: Optional detector compute device. For MLX, use cpu or gpu; omitted uses the backend default.
 --ocr_batch_size: Number of OCR crops to run through decoder generation in one batch.
 --ocr_reorder_buffer_size: Number of OCR crop requests to stage before OCR batching. This is reserved for future crop reordering; current behavior preserves request order.
 --timings_file: Path to a JSONL file with one per-OCR-crop timing/statistics record. Each line includes page/block/line/chunk indices, crop dimensions, token count, OCR latency, and actual OCR batch size.
@@ -124,7 +159,7 @@ These options are mainly useful for profiling, model experiments, and tuning bat
 Fire also accepts hyphenated option names, for example:
 
 ```bash
-mokuro ./vol1 --ocr-bf16 --ocr-batch-size=8 --ocr-reorder-buffer-size=32 --ocr-summary-file=ocr-summary.json
+mokuro-fast ./vol1 --ocr-bf16 --ocr-batch-size=8 --ocr-reorder-buffer-size=32 --ocr-summary-file=ocr-summary.json
 ```
 
 ## Legacy HTML vs. new .mokuro format

@@ -6,10 +6,10 @@ import numpy as np
 from loguru import logger
 from yattag import Doc
 
-from mokuro import __version__
-from mokuro.env import ASSETS_PATH
-from mokuro.utils import load_json
-from mokuro.volume import Volume
+from mokuro_fast import __version__
+from mokuro_fast.env import ASSETS_PATH
+from mokuro_fast.utils import load_json
+from mokuro_fast.volume import Volume
 
 SCRIPT_PATH = Path(__file__).parent / "script.js"
 STYLES_PATH = Path(__file__).parent / "styles.css"
